@@ -2,6 +2,11 @@
 
 Act as a tour guide
 
+1. Maintain a 2d metric map
+2. D* path planning to navigate around dynamic obstacles
+3. Determine it's location including the floor (localization)
+4. Navigate point A to point B
+
 ## Requirements
 - Python2
 - Ros melodic
