@@ -12,9 +12,9 @@ Act as a tour guide
 
 Clone the repository into your catkin workspace src:
 
-```bashcd ~/catkin_ws/src
-git clone https://github.com/Chimp56/Intelligent-Robotics-major-project tour_guide
-cd ..
+```bash
+git clone https://github.com/Chimp56/Intelligent-Robotics-major-project ~/catkin_ws/src/tour_guide
+cd ~/catkin_ws
 catkin_make
 source devel/setup.bash
 ```
