@@ -27,9 +27,9 @@
     <arg name="world_name" value="$(arg world_file)"/>
   </include>
 
-  <!--  Spawn TurtleBot via YOUR include (mainproject) 
+  <!--  Spawn TurtleBot via YOUR include (tour_guide) 
        Your includes expect x/y/z in meters and yaw in radians. -->
-  <include file="$(find mainproject)/launch/includes/$(arg base).launch.xml">
+  <include file="$(find tour_guide)/launch/includes/$(arg base).launch.xml">
     <arg name="base" value="$(arg base)"/>
     <arg name="stacks" value="$(arg stacks)"/>
     <arg name="3d_sensor" value="$(arg 3d_sensor)"/>
@@ -77,7 +77,7 @@
 
   <!--  Optional: your task planner (off by default)  -->
   <group if="$(arg launch_task_planner)">
-    <node pkg="mainproject" type="task_planner.py" name="task_planner" output="screen">
+    <node pkg="tour_guide" type="task_planner.py" name="task_planner" output="screen">
       <param name="tasks_text" value="$(arg tasks)"/>
       <param name="start_x_feet" value="$(arg x_feet)"/>
       <param name="start_y_feet" value="$(arg y_feet)"/>
@@ -86,9 +86,9 @@
   </group>
 
   <!--  D* planner + controller + monitor (our nodes)  -->
-  <node pkg="mainproject" type="dstar_planner.py"        name="dstar_planner"        output="screen"/>
-  <node pkg="mainproject" type="navigation_controller.py" name="navigation_controller" output="screen"/>
-  <node pkg="mainproject" type="execution_monitor.py"     name="execution_monitor"     output="screen"/>
+  <node pkg="tour_guide" type="dstar_planner.py"        name="dstar_planner"        output="screen"/>
+  <node pkg="tour_guide" type="navigation_controller.py" name="navigation_controller" output="screen"/>
+  <node pkg="tour_guide" type="execution_monitor.py"     name="execution_monitor"     output="screen"/>
 
   <!--  RViz (no custom config required)  -->
   <node pkg="rviz" type="rviz" name="rviz" args=""/>
