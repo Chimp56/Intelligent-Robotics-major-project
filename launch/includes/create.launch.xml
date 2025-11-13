@@ -1,22 +1,30 @@
 <launch>
-  <arg name="base"/>
-  <arg name="stacks"/>
-  <arg name="3d_sensor"/>
-  
-  <!-- Initial pose arguments -->
-  <arg name="x" default="0.0"/>
-  <arg name="y" default="0.0"/>
-  <arg name="z" default="0.0"/>
+  <!-- Args expected from parent -->
+  <arg name="base" default="create"/>
+  <arg name="stacks" default="hexagons"/>
+  <arg name="3d_sensor" default="kinect"/>
+
+  <!-- Initial pose (meters/radians) -->
+  <arg name="x"   default="0.0"/>
+  <arg name="y"   default="0.0"/>
+  <arg name="z"   default="0.0"/>
   <arg name="yaw" default="0.0"/>
 
+  <!-- Robot description (TurtleBot URDF/Xacro) -->
   <arg name="urdf_file" default="$(find xacro)/xacro '$(find turtlebot_description)/robots/$(arg base)_$(arg stacks)_$(arg 3d_sensor).urdf.xacro'"/>
   <param name="robot_description" command="$(arg urdf_file)"/>
 
-  <!-- Gazebo model spawner -->
+  <!-- Publish TF from URDF -->
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+    <param name="publish_frequency" value="30.0"/>
+  </node>
+  <node pkg="joint_state_publisher" type="joint_state_publisher" name="joint_state_publisher" />
+
+  <!-- Spawn into Gazebo -->
   <node name="spawn_turtlebot_model" pkg="gazebo_ros" type="spawn_model"
         args="-x $(arg x) -y $(arg y) -z $(arg z) -Y $(arg yaw) -unpause -urdf -param robot_description -model turtlebot"/>
 
-  <!-- Odometry estimator -->
+  <!-- Odometry EKF (if IMU available in sim) -->
   <node pkg="robot_pose_ekf" type="robot_pose_ekf" name="robot_pose_ekf">
     <remap from="imu_data" to="turtlebot_node/imu/data"/>
     <remap from="robot_pose_ekf/odom" to="odom_combined"/>
@@ -32,7 +40,7 @@
   <node pkg="nodelet" type="nodelet" name="mobile_base_nodelet_manager" args="manager"/>
   <node pkg="nodelet" type="nodelet" name="cmd_vel_mux"
         args="load yocs_cmd_vel_mux/CmdVelMuxNodelet mobile_base_nodelet_manager">
-    <param name="yaml_cfg_file" value="$(find project2)/param/mux.yaml"/>
+    <param name="yaml_cfg_file" value="$(find tour_guide)/param/mux.yaml"/>
     <remap from="cmd_vel_mux/output" to="turtlebot_node/cmd_vel"/>
   </node>
 </launch>
