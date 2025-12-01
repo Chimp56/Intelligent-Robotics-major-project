@@ -1,0 +1,16 @@
+<launch>
+<!-- Main executive -->
+<node pkg="tour_guide" type="controller.py" name="controller" output="screen"/>
+
+
+<!-- helpers -->
+<!-- <node pkg="tour_guide" type="mission_planner.py" name="mission_planner" output="screen"/> -->
+<node pkg="tour_guide" type="autonomous_mapper.py" name="mapper_node" output="screen"/>
+<!-- <node pkg="tour_guide" type="navigator_node.py" name="navigator_node" output="screen"/>
+<node pkg="tour_guide" type="waypoint_saver.py" name="waypoint_saver" output="screen"/>
+<node pkg="tour_guide" type="stuck_detector.py" name="stuck_detector" output="screen"/>
+<node pkg="tour_guide" type="recovery_manager.py" name="recovery_manager" output="screen"/>
+<node pkg="tour_guide" type="guide_manager.py" name="guide_manager" output="screen"/>
+<node pkg="tour_guide" type="reactive/safety_monitor.py" name="safety_monitor" output="screen"/>
+<node pkg="tour_guide" type="perception/follower_detector.py" name="follower_detector" output="screen"/> -->
+</launch>

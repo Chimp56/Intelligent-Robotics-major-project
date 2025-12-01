@@ -1,0 +1,14 @@
+<launch>
+<arg name="use_sim_time" default="true"/>
+<param name="use_sim_time" value="$(arg use_sim_time)"/>
+
+
+<!-- AMCL -->
+<node pkg="amcl" type="amcl" name="amcl" output="screen">
+<param name="odom_frame_id" value="odom"/>
+</node>
+
+
+<!-- move_base -->
+<node pkg="move_base" type="move_base" name="move_base" output="screen"/>
+</launch>

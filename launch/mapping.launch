@@ -2,7 +2,7 @@
   <!-- General args -->
   <arg name="gui"        default="true"/>
   <!-- Use your own world if you have one; falls back to empty world -->
-  <arg name="world_file" default="$(find gazebo_ros)/worlds/empty.world"/>
+  <arg name="world_file" default="$(find tour_guide)/world/sec2.world"/>
 
   <!-- Initial pose (in feet / degrees to match your earlier workflow) -->
   <arg name="x_feet" default="1.0"/>
@@ -15,9 +15,12 @@
   <arg name="stacks"     value="$(optenv TURTLEBOT_STACKS hexagons)"/> <!-- circles | hexagons -->
   <arg name="3d_sensor"  value="$(optenv TURTLEBOT_3D_SENSOR kinect)"/> <!-- kinect | asus_xtion_pro -->
 
-  <!-- Optionally run a task_planner (off by default). We’ll publish /task_planner/next_goal manually. -->
+  <!-- Optionally run a task_planner (off by default). We'll publish /task_planner/next_goal manually. -->
   <arg name="launch_task_planner" default="false"/>
   <arg name="tasks" default="((5, 1), (10, 4));((12, 9), (4, 15))"/>
+  
+  <!-- Navigation controller mode: idle, mapping, auto, manual -->
+  <arg name="mode" default="mapping"/>
 
   <!-- Gazebo world  -->
   <include file="$(find gazebo_ros)/launch/empty_world.launch">
@@ -84,11 +87,12 @@
       <param name="start_theta_deg" value="$(arg yaw_deg)"/>
     </node>
   </group>
-
-  <!--  D* planner + controller + monitor (our nodes)  -->
-  <node pkg="tour_guide" type="dstar_planner.py"        name="dstar_planner"        output="screen"/>
-  <node pkg="tour_guide" type="navigation_controller.py" name="navigation_controller" output="screen"/>
-  <node pkg="tour_guide" type="execution_monitor.py"     name="execution_monitor"     output="screen"/>
+  
+  <!--  Optional: Legacy D* planner for compatibility (can be used alongside unified controller in auto mode)  -->
+  <group if="$(eval arg('mode') == 'auto')">
+    <!-- If you want to use the separate D* planner instead of the integrated one, uncomment below -->
+    <!-- <node pkg="tour_guide" type="dstar_planner.py" name="dstar_planner" output="screen"/> -->
+  </group>
 
   <!--  RViz (no custom config required)  -->
   <node pkg="rviz" type="rviz" name="rviz" args=""/>

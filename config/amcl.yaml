@@ -1,0 +1,3 @@
+amcl:
+  min_particles: 500
+  max_particles: 2000
