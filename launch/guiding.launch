@@ -1,0 +1,118 @@
+<?xml version="1.0"?>
+<launch>
+  <!--
+    guiding.launch
+    
+    Launch file for tour guiding mode.
+    Launches navigation stack, YOLO (darknet_ros), human tracker, and controller.
+    Controller acts as the master orchestrator.
+    
+    Usage:
+      roslaunch tour_guide guiding.launch [use_sim_time:=true] [map_file:=/path/to/map.yaml]
+  -->
+  
+  <!-- ===================================================================== -->
+  <!-- ARGUMENTS -->
+  <!-- ===================================================================== -->
+  
+  <!-- Use simulation time -->
+  <arg name="use_sim_time" default="true"/>
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  
+  <!-- Map file (required for navigation) -->
+  <arg name="map_file" default="$(find tour_guide)/maps/map.yaml"/>
+  
+  <!-- Launch RViz -->
+  <arg name="launch_rviz" default="true"/>
+  <arg name="rviz_config" default="$(find tour_guide)/rviz/guiding.rviz"/>
+  
+  <!-- YOLO configuration -->
+  <arg name="yolo_config_file" default="$(find darknet_ros)/config/ros.yaml"/>
+  <arg name="yolo_weights_file" default="$(find darknet_ros)/yolo_network_config/weights/yolov2-tiny.weights"/>
+  <arg name="yolo_config_path" default="$(find darknet_ros)/yolo_network_config/cfg/yolov2-tiny.cfg"/>
+  
+  <!-- Camera topic (for YOLO) -->
+  <arg name="camera_topic" default="/camera/rgb/image_raw"/>
+  
+  <!-- ===================================================================== -->
+  <!-- CONTROLLER (MASTER NODE) -->
+  <!-- ===================================================================== -->
+  
+  <!-- Main executive controller - orchestrates all subsystems -->
+  <node pkg="tour_guide" type="controller.py" name="tour_guide_controller" output="screen">
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+    <param name="package_path" value="$(find tour_guide)"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- NAVIGATION STACK -->
+  <!-- ===================================================================== -->
+  
+  <!-- Launch navigation stack (AMCL + move_base) -->
+  <include file="$(find tour_guide)/launch/navigation.launch">
+    <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+    <arg name="map_file" value="$(arg map_file)"/>
+  </include>
+  
+  <!-- ===================================================================== -->
+  <!-- YOLO OBJECT DETECTION (darknet_ros) -->
+  <!-- ===================================================================== -->
+  
+  <!-- YOLO detection node -->
+  <node pkg="darknet_ros" type="darknet_ros" name="darknet_ros" output="screen" respawn="true">
+    <!-- Configuration file -->
+    <rosparam file="$(arg yolo_config_file)" command="load"/>
+    
+    <!-- YOLO network files -->
+    <param name="yolo_weights_path" value="$(arg yolo_weights_file)"/>
+    <param name="yolo_config_path" value="$(arg yolo_config_path)"/>
+    
+    <!-- Camera topic -->
+    <remap from="/camera/rgb/image_raw" to="$(arg camera_topic)"/>
+    
+    <!-- Enable/disable topic (controlled by controller) -->
+    <param name="enable" value="false"/>  <!-- Will be enabled by controller in GUIDING state -->
+    
+    <!-- Use simulation time -->
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- HUMAN TRACKER -->
+  <!-- ===================================================================== -->
+  
+  <!-- Human tracking node -->
+  <node pkg="tour_guide" type="human_tracker.py" name="human_tracker" output="screen">
+    <!-- Tracking parameters -->
+    <param name="lost_frame_threshold" value="10"/>
+    <param name="person_class_names" value="[person]"/>
+    <param name="min_confidence" value="0.5"/>
+    <param name="image_width" value="640"/>
+    <param name="image_height" value="480"/>
+    
+    <!-- Use simulation time -->
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- VISUALIZATION -->
+  <!-- ===================================================================== -->
+  
+  <!-- RViz -->
+  <node pkg="rviz" type="rviz" name="rviz" 
+        args="-d $(arg rviz_config)" 
+        output="screen" 
+        if="$(arg launch_rviz)"/>
+  
+  <!-- ===================================================================== -->
+  <!-- OPTIONAL: ADDITIONAL NODES -->
+  <!-- ===================================================================== -->
+  
+  <!-- Optional: Waypoint manager or tour route loader -->
+  <!-- <node pkg="tour_guide" type="waypoint_manager.py" name="waypoint_manager" output="screen"/> -->
+  
+  <!-- Optional: Safety monitor -->
+  <!-- <node pkg="tour_guide" type="safety_monitor.py" name="safety_monitor" output="screen"/> -->
+  
+</launch>
+

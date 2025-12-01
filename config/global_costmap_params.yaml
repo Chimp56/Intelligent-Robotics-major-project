@@ -1,0 +1,71 @@
+# global_costmap_params.yaml
+# Global costmap parameters for TurtleBot2
+# Used for global path planning
+
+global_costmap:
+  global_frame: map           # Frame for global costmap (map frame)
+  robot_base_frame: base_link # Base frame of the robot
+  
+  # Update frequencies
+  update_frequency: 1.0       # Update frequency (Hz) - lower than local (static map)
+  publish_frequency: 0.5       # Publish frequency (Hz)
+  
+  # Costmap properties
+  static_map: true            # Global costmap uses static map
+  rolling_window: false       # No rolling window (uses full map)
+  width: 10.0                 # Width of costmap (meters) - only used if rolling_window=true
+  height: 10.0                # Height of costmap (meters) - only used if rolling_window=true
+  resolution: 0.05           # Resolution (meters per cell)
+  
+  # Plugins (layers)
+  plugins:
+    - {name: static_layer, type: "costmap_2d::StaticLayer"}
+    - {name: obstacle_layer, type: "costmap_2d::ObstacleLayer"}
+    - {name: inflation_layer, type: "costmap_2d::InflationLayer"}
+  
+  # Static layer configuration (loads from map_server)
+  static_layer:
+    enabled: true
+    map_topic: /map
+    subscribe_to_updates: true
+    track_unknown_space: true
+    use_maximum: false
+    trinary_costmap: true
+  
+  # Obstacle layer configuration (for dynamic obstacles)
+  obstacle_layer:
+    enabled: true
+    observation_sources: scan
+    
+    scan:
+      topic: /scan
+      data_type: LaserScan
+      marking: true
+      clearing: true
+      expected_update_rate: 0.0
+      observation_persistence: 0.0
+      max_obstacle_height: 0.4
+      raytrace_max_range: 3.0
+      obstacle_max_range: 2.5
+      inf_is_valid: false
+      clearing_on_max_reading: true
+      raytrace_min_range: 0.0
+      obstacle_min_range: 0.0
+  
+  # Inflation layer configuration
+  inflation_layer:
+    enabled: true
+    cost_scaling_factor: 5.0
+    inflation_radius: 0.55
+  
+  # Robot footprint (TurtleBot2)
+  footprint: [[-0.18, -0.18], [-0.18, 0.18], [0.18, 0.18], [0.18, -0.18]]
+  footprint_padding: 0.01
+  
+  # Transform settings
+  transform_tolerance: 0.2
+  
+  # Map update settings
+  map_update_frequency: 1.0
+  always_send_full_costmap: false
+

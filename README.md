@@ -25,6 +25,8 @@ source devel/setup.bash
 ```
 
 ```bash
+cd ~/catkin_ws/src/tour_guide/scripts
+sed -i 's/\r$//' *.py
 chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
 ```
 ## Help
@@ -33,6 +35,11 @@ chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
 
 ### keyboard movement
 
+To control turtlebot using keyboard, open a new terminal and run:
+```bash
+roslaunch turtlebot_teleop keyboard_teleop.launch
+```
+
 https://wiki.ros.org/cmd_vel_mux
 
 ### Vincent quick start up
@@ -40,9 +47,27 @@ https://wiki.ros.org/cmd_vel_mux
 ```
 git stash
 git pull
+cd ~/catkin_ws/src/tour_guide/scripts
+sed -i 's/\r$//' *.py
 chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
 source ~/catkin_ws/devel/setup.bash
-roslaunch tour_guide mapping.launch
+roslaunch tour_guide autonomous_map.launch
+```
 
+### Testing Basic Movement
+
+To test the controller with simple circular movement:
+
+```bash
+# With simulation
+roslaunch tour_guide test_circle.launch
+
+# Minimal (real robot, no simulation)
+roslaunch tour_guide test_circle_minimal.launch
+```
+
+The robot will move in a circle. Adjust speed via parameters:
+- `linear_speed`: Forward speed (default: 0.15 m/s)
+- `angular_speed`: Rotation speed (default: 0.3 rad/s)
 
 ```

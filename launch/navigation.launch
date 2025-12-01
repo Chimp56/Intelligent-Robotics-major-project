@@ -1,14 +1,130 @@
+<?xml version="1.0"?>
 <launch>
-<arg name="use_sim_time" default="true"/>
-<param name="use_sim_time" value="$(arg use_sim_time)"/>
-
-
-<!-- AMCL -->
-<node pkg="amcl" type="amcl" name="amcl" output="screen">
-<param name="odom_frame_id" value="odom"/>
-</node>
-
-
-<!-- move_base -->
-<node pkg="move_base" type="move_base" name="move_base" output="screen"/>
+  <!--
+    navigation.launch
+    
+    Launch file for navigation mode with AMCL localization and move_base.
+    Supports both simulation (Gazebo) and real robot.
+    
+    Usage:
+      Simulation: roslaunch tour_guide navigation.launch use_sim_time:=true
+      Real robot: roslaunch tour_guide navigation.launch use_sim_time:=false map_file:=/path/to/map.yaml
+  -->
+  
+  <!-- ===================================================================== -->
+  <!-- ARGUMENTS -->
+  <!-- ===================================================================== -->
+  
+  <!-- Use simulation time -->
+  <arg name="use_sim_time" default="true"/>
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  
+  <!-- Map file (required for real robot, optional for simulation) -->
+  <arg name="map_file" default="$(find tour_guide)/maps/map.yaml"/>
+  
+  <!-- AMCL configuration file -->
+  <arg name="amcl_config_file" default="$(find tour_guide)/config/amcl.yaml"/>
+  
+  <!-- Costmap common parameters -->
+  <arg name="costmap_common_file" default="$(find tour_guide)/config/costmap_common.yaml"/>
+  
+  <!-- Move base configuration -->
+  <arg name="move_base_config_file" default="$(find tour_guide)/config/move_base.yaml"/>
+  
+  <!-- DWA local planner configuration -->
+  <arg name="dwa_local_planner_file" default="$(find tour_guide)/config/dwa_local_planner.yaml"/>
+  
+  <!-- Global planner (default: navfn) -->
+  <arg name="global_planner" default="navfn/NavfnROS"/>
+  
+  <!-- Local planner (default: dwa) -->
+  <arg name="local_planner" default="dwa_local_planner/DWAPlannerROS"/>
+  
+  <!-- ===================================================================== -->
+  <!-- MAP SERVER (for real robot or pre-built map) -->
+  <!-- ===================================================================== -->
+  
+  <!-- Load map if map file is provided -->
+  <node name="map_server" pkg="map_server" type="map_server" 
+        args="$(arg map_file)" output="screen" if="$(eval arg('map_file') != '')">
+    <param name="frame_id" value="map"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- AMCL LOCALIZATION -->
+  <!-- ===================================================================== -->
+  
+  <!-- AMCL node -->
+  <node pkg="amcl" type="amcl" name="amcl" output="screen">
+    <!-- Load AMCL parameters -->
+    <rosparam file="$(arg amcl_config_file)" command="load" ns="amcl"/>
+    
+    <!-- Frame IDs -->
+    <param name="odom_frame_id" value="odom"/>
+    <param name="base_frame_id" value="base_link"/>
+    <param name="global_frame_id" value="map"/>
+    
+    <!-- Laser scan topic -->
+    <remap from="scan" to="/scan"/>
+    
+    <!-- Initial pose (optional, can be set via service call) -->
+    <param name="initial_pose_x" value="0.0"/>
+    <param name="initial_pose_y" value="0.0"/>
+    <param name="initial_pose_a" value="0.0"/>
+    
+    <!-- Use simulation time -->
+    <param name="use_map_topic" value="true"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- MOVE_BASE NAVIGATION -->
+  <!-- ===================================================================== -->
+  
+  <!-- Move base node -->
+  <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
+    
+    <!-- Global planner -->
+    <param name="base_global_planner" value="$(arg global_planner)"/>
+    
+    <!-- Local planner -->
+    <param name="base_local_planner" value="$(arg local_planner)"/>
+    
+    <!-- Load costmap common parameters -->
+    <rosparam file="$(arg costmap_common_file)" command="load" ns="global_costmap"/>
+    <rosparam file="$(arg costmap_common_file)" command="load" ns="local_costmap"/>
+    
+    <!-- Global costmap parameters -->
+    <rosparam file="$(find tour_guide)/config/global_costmap.yaml" command="load" ns="global_costmap" if="$(eval arg('use_sim_time') == false)"/>
+    <rosparam file="$(find tour_guide)/config/global_costmap.yaml" command="load" ns="global_costmap" unless="$(eval arg('use_sim_time') == false)"/>
+    
+    <!-- Local costmap parameters -->
+    <rosparam file="$(find tour_guide)/config/local_costmap.yaml" command="load" ns="local_costmap" if="$(eval arg('use_sim_time') == false)"/>
+    <rosparam file="$(find tour_guide)/config/local_costmap.yaml" command="load" ns="local_costmap" unless="$(eval arg('use_sim_time') == false)"/>
+    
+    <!-- DWA local planner parameters -->
+    <rosparam file="$(arg dwa_local_planner_file)" command="load" ns="DWAPlannerROS" if="$(eval arg('local_planner') == 'dwa_local_planner/DWAPlannerROS')"/>
+    
+    <!-- Base local planner parameters (for other planners) -->
+    <rosparam file="$(find tour_guide)/config/base_local_planner.yaml" command="load" ns="TrajectoryPlannerROS" unless="$(eval arg('local_planner') == 'dwa_local_planner/DWAPlannerROS')"/>
+    
+    <!-- Frame IDs -->
+    <param name="global_costmap/global_frame" value="map"/>
+    <param name="global_costmap/robot_base_frame" value="base_link"/>
+    <param name="local_costmap/global_frame" value="odom"/>
+    <param name="local_costmap/robot_base_frame" value="base_link"/>
+    
+    <!-- Laser scan topic -->
+    <remap from="scan" to="/scan"/>
+    
+    <!-- Use simulation time -->
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- STATIC TRANSFORMS (if needed for real robot) -->
+  <!-- ===================================================================== -->
+  
+  <!-- Note: For real robots, ensure proper TF tree is published -->
+  <!-- This is typically handled by robot_state_publisher and odometry -->
+  
 </launch>

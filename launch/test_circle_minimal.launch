@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<launch>
+  <!--
+    test_circle_minimal.launch
+    
+    Minimal launch file - only controller and circle test node.
+    No simulation, no visualization. Use this for real robot testing.
+    
+    Usage:
+      roslaunch tour_guide test_circle_minimal.launch
+  -->
+  
+  <!-- Arguments -->
+  <arg name="use_sim_time" default="false"/>
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  
+  <!-- ===================================================================== -->
+  <!-- CONTROLLER -->
+  <!-- ===================================================================== -->
+  
+  <node pkg="tour_guide" type="controller.py" name="tour_guide_controller" output="screen">
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+  
+  <!-- ===================================================================== -->
+  <!-- CIRCLE TEST NODE -->
+  <!-- ===================================================================== -->
+  
+  <node pkg="tour_guide" type="test_circle.py" name="test_circle" output="screen">
+    <param name="linear_speed" value="0.15"/>   <!-- Forward speed (m/s) -->
+    <param name="angular_speed" value="0.3"/>   <!-- Rotation speed (rad/s) -->
+    <param name="rate" value="10.0"/>            <!-- Control loop rate (Hz) -->
+  </node>
+  
+</launch>
+
