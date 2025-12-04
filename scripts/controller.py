@@ -786,13 +786,13 @@ class Controller:
     #     zero_vel = Twist()
     #     self.cmd_vel_pub.publish(zero_vel)
     
-    # def _shutdown_handler(self):
-    #     """Cleanup on node shutdown."""
-    #     rospy.loginfo("Shutting down Tour Guide Controller...")
-    #     self._cancel_navigation_goals()
-    #     self._stop_gmapping()
-    #     self._disable_yolo()
-    #     self._stop_all_motion()
+    def _shutdown_handler(self):
+        """Cleanup on node shutdown."""
+        rospy.loginfo("Shutting down Tour Guide Controller...")
+        self._cancel_navigation_goals()
+        # self._stop_gmapping()
+        # self._disable_yolo()
+        # self._stop_all_motion()
 
 
 
