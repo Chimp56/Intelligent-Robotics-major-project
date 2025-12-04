@@ -51,7 +51,8 @@ cd ~/catkin_ws/src/tour_guide/scripts
 sed -i 's/\r$//' *.py
 chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
 source ~/catkin_ws/devel/setup.bash
-roslaunch tour_guide autonomous_map.launch
+roslaunch tour_guide controller.launch
+
 ```
 
 ### Testing Basic Movement
