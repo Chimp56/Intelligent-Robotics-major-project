@@ -109,7 +109,7 @@ class Controller:
         self.navigation_error = False
         self.goal_reached = False
         self.move_base_client = None
-        self._init_move_base_client()
+        # self._init_move_base_client()
         
         
         # ====================================================================
@@ -144,12 +144,12 @@ class Controller:
         # ====================================================================
         # ROS SERVICES (for user commands)
         # ====================================================================
-        rospy.Service(SERVICE_START_MAPPING, Empty, self._srv_start_mapping)
-        rospy.Service(SERVICE_STOP_MAPPING, Empty, self._srv_stop_mapping)
-        rospy.Service(SERVICE_START_NAVIGATION, Empty, self._srv_start_navigation)
-        rospy.Service(SERVICE_START_GUIDING, Empty, self._srv_start_guiding)
-        rospy.Service(SERVICE_EMERGENCY_STOP, Empty, self._srv_emergency_stop)
-        rospy.Service(SERVICE_RESUME, Empty, self._srv_resume)
+        # rospy.Service(SERVICE_START_MAPPING, Empty, self._srv_start_mapping)
+        # rospy.Service(SERVICE_STOP_MAPPING, Empty, self._srv_stop_mapping)
+        # rospy.Service(SERVICE_START_NAVIGATION, Empty, self._srv_start_navigation)
+        # rospy.Service(SERVICE_START_GUIDING, Empty, self._srv_start_guiding)
+        # rospy.Service(SERVICE_EMERGENCY_STOP, Empty, self._srv_emergency_stop)
+        # rospy.Service(SERVICE_RESUME, Empty, self._srv_resume)
         
         # ====================================================================
         # STATE MACHINE TIMER
@@ -198,23 +198,23 @@ class Controller:
                 self._start_amcl()
                 self.transition_to(RobotState.IDLE)
     
-    def _cb_human_tracking(self, msg):
-        """
-        Callback for human tracking status.
+    # def _cb_human_tracking(self, msg):
+    #     """
+    #     Callback for human tracking status.
         
-        Args:
-            msg: std_msgs/String - "PERSON_FOUND" or "PERSON_LOST"
-        """
-        if msg.data == "PERSON_FOUND":
-            self.human_tracked = True
-            self.human_lost = False
-        elif msg.data == "PERSON_LOST":
-            self.human_tracked = False
-            self.human_lost = True
-            # If we're guiding and lose the person, transition to recovery
-            if self.state == RobotState.GUIDING:
-                rospy.logwarn("Human lost during guiding! Transitioning to RECOVERY")
-                self.transition_to(RobotState.RECOVERY)
+    #     Args:
+    #         msg: std_msgs/String - "PERSON_FOUND" or "PERSON_LOST"
+    #     """
+    #     if msg.data == "PERSON_FOUND":
+    #         self.human_tracked = True
+    #         self.human_lost = False
+    #     elif msg.data == "PERSON_LOST":
+    #         self.human_tracked = False
+    #         self.human_lost = True
+    #         # If we're guiding and lose the person, transition to recovery
+    #         if self.state == RobotState.GUIDING:
+    #             rospy.logwarn("Human lost during guiding! Transitioning to RECOVERY")
+    #             self.transition_to(RobotState.RECOVERY)
     
     
     def _cb_manual_override(self, msg):
@@ -270,120 +270,120 @@ class Controller:
     # SERVICE HANDLERS (User Commands)
     # ========================================================================
     
-    def _srv_start_mapping(self, req):
-        """
-        Service handler to start mapping mode.
+    # def _srv_start_mapping(self, req):
+    #     """
+    #     Service handler to start mapping mode.
         
-        Args:
-            req: Empty service request
+    #     Args:
+    #         req: Empty service request
             
-        Returns:
-            EmptyResponse
-        """
-        rospy.loginfo("Service call: start_mapping")
-        if self.state == RobotState.IDLE:
-            self.transition_to(RobotState.MAPPING)
-        else:
-            rospy.logwarn("Cannot start mapping from state: %s", self.state.value)
-        return EmptyResponse()
+    #     Returns:
+    #         EmptyResponse
+    #     """
+    #     rospy.loginfo("Service call: start_mapping")
+    #     if self.state == RobotState.IDLE:
+    #         self.transition_to(RobotState.MAPPING)
+    #     else:
+    #         rospy.logwarn("Cannot start mapping from state: %s", self.state.value)
+    #     return EmptyResponse()
     
-    def _srv_stop_mapping(self, req):
-        """
-        Service handler to stop mapping mode.
+    # def _srv_stop_mapping(self, req):
+    #     """
+    #     Service handler to stop mapping mode.
         
-        Args:
-            req: Empty service request
+    #     Args:
+    #         req: Empty service request
             
-        Returns:
-            EmptyResponse
-        """
-        rospy.loginfo("Service call: stop_mapping")
-        if self.state == RobotState.MAPPING:
-            self._stop_gmapping()
-            self.transition_to(RobotState.IDLE)
-        else:
-            rospy.logwarn("Cannot stop mapping from state: %s", self.state.value)
-        return EmptyResponse()
+    #     Returns:
+    #         EmptyResponse
+    #     """
+    #     rospy.loginfo("Service call: stop_mapping")
+    #     if self.state == RobotState.MAPPING:
+    #         self._stop_gmapping()
+    #         self.transition_to(RobotState.IDLE)
+    #     else:
+    #         rospy.logwarn("Cannot stop mapping from state: %s", self.state.value)
+    #     return EmptyResponse()
     
-    def _srv_start_navigation(self, req):
-        """
-        Service handler to start navigation mode.
-        Note: This requires a goal to be set via topic or parameter.
+    # def _srv_start_navigation(self, req):
+    #     """
+    #     Service handler to start navigation mode.
+    #     Note: This requires a goal to be set via topic or parameter.
         
-        Args:
-            req: Empty service request
+    #     Args:
+    #         req: Empty service request
             
-        Returns:
-            EmptyResponse
-        """
-        rospy.loginfo("Service call: start_navigation")
-        if self.state == RobotState.IDLE:
-            # Check if a goal is available (from parameter or topic)
-            goal = self._get_navigation_goal()
-            if goal:
-                self._send_navigation_goal(goal)
-                self.transition_to(RobotState.NAVIGATING)
-            else:
-                rospy.logwarn("No navigation goal available. Set goal via /move_base_simple/goal first.")
-        else:
-            rospy.logwarn("Cannot start navigation from state: %s", self.state.value)
-        return EmptyResponse()
+    #     Returns:
+    #         EmptyResponse
+    #     """
+    #     rospy.loginfo("Service call: start_navigation")
+    #     if self.state == RobotState.IDLE:
+    #         # Check if a goal is available (from parameter or topic)
+    #         goal = self._get_navigation_goal()
+    #         if goal:
+    #             self._send_navigation_goal(goal)
+    #             self.transition_to(RobotState.NAVIGATING)
+    #         else:
+    #             rospy.logwarn("No navigation goal available. Set goal via /move_base_simple/goal first.")
+    #     else:
+    #         rospy.logwarn("Cannot start navigation from state: %s", self.state.value)
+    #     return EmptyResponse()
     
-    def _srv_start_guiding(self, req):
-        """
-        Service handler to start guiding mode.
+    # def _srv_start_guiding(self, req):
+    #     """
+    #     Service handler to start guiding mode.
         
-        Args:
-            req: Empty service request
+    #     Args:
+    #         req: Empty service request
             
-        Returns:
-            EmptyResponse
-        """
-        rospy.loginfo("Service call: start_guiding")
-        if self.state == RobotState.IDLE:
-            if not self.mapping_complete:
-                rospy.logwarn("Cannot start guiding: mapping not complete")
-                return EmptyResponse()
-            self.transition_to(RobotState.GUIDING)
-        else:
-            rospy.logwarn("Cannot start guiding from state: %s", self.state.value)
-        return EmptyResponse()
+    #     Returns:
+    #         EmptyResponse
+    #     """
+    #     rospy.loginfo("Service call: start_guiding")
+    #     if self.state == RobotState.IDLE:
+    #         if not self.mapping_complete:
+    #             rospy.logwarn("Cannot start guiding: mapping not complete")
+    #             return EmptyResponse()
+    #         self.transition_to(RobotState.GUIDING)
+    #     else:
+    #         rospy.logwarn("Cannot start guiding from state: %s", self.state.value)
+    #     return EmptyResponse()
     
-    def _srv_emergency_stop(self, req):
-        """
-        Service handler for emergency stop.
+    # def _srv_emergency_stop(self, req):
+    #     """
+    #     Service handler for emergency stop.
         
-        Args:
-            req: Empty service request
+    #     Args:
+    #         req: Empty service request
             
-        Returns:
-            EmptyResponse
-        """
-        rospy.logfatal("EMERGENCY STOP activated!")
-        self.transition_to(RobotState.STOP)
-        return EmptyResponse()
+    #     Returns:
+    #         EmptyResponse
+    #     """
+    #     rospy.logfatal("EMERGENCY STOP activated!")
+    #     self.transition_to(RobotState.STOP)
+    #     return EmptyResponse()
     
-    def _srv_resume(self, req):
-        """
-        Service handler to resume from STOP or RECOVERY state.
+    # def _srv_resume(self, req):
+    #     """
+    #     Service handler to resume from STOP or RECOVERY state.
         
-        Args:
-            req: Empty service request
+    #     Args:
+    #         req: Empty service request
             
-        Returns:
-            EmptyResponse
-        """
-        rospy.loginfo("Service call: resume")
-        if self.state == RobotState.STOP:
-            self.transition_to(RobotState.IDLE)
-        elif self.state == RobotState.RECOVERY:
-            if self.prev_state:
-                self.transition_to(self.prev_state)
-            else:
-                self.transition_to(RobotState.IDLE)
-        else:
-            rospy.logwarn("Cannot resume from state: %s", self.state.value)
-        return EmptyResponse()
+    #     Returns:
+    #         EmptyResponse
+    #     """
+    #     rospy.loginfo("Service call: resume")
+    #     if self.state == RobotState.STOP:
+    #         self.transition_to(RobotState.IDLE)
+    #     elif self.state == RobotState.RECOVERY:
+    #         if self.prev_state:
+    #             self.transition_to(self.prev_state)
+    #         else:
+    #             self.transition_to(RobotState.IDLE)
+    #     else:
+    #         rospy.logwarn("Cannot resume from state: %s", self.state.value)
+    #     return EmptyResponse()
     
     # ========================================================================
     # STATE TRANSITION MANAGEMENT
@@ -443,6 +443,8 @@ class Controller:
             self._cancel_navigation_goals()
             self._disable_yolo()
         elif state == RobotState.TEST_CIRCLE:
+            pass
+        elif state == RobotState.IDLE:
             pass
     
     def _exit_state(self, state):
@@ -570,227 +572,227 @@ class Controller:
     # GMAPPING MANAGEMENT
     # ========================================================================
     
-    def _start_gmapping(self):
-        """Start gmapping SLAM process."""
-        if self.mapping_active:
-            rospy.logwarn("Gmapping already active")
-            return
+    # def _start_gmapping(self):
+    #     """Start gmapping SLAM process."""
+    #     if self.mapping_active:
+    #         rospy.logwarn("Gmapping already active")
+    #         return
         
-        rospy.loginfo("Starting gmapping...")
-        try:
-            # Launch gmapping via roslaunch
-            # Note: In production, you might want to use a more robust method
-            # For now, we'll assume gmapping is launched externally or via service
-            # Alternative: use dynamic_reconfigure or service calls if available
-            self.mapping_active = True
-            self.mapping_complete = False
-            rospy.loginfo("Gmapping started (assumes external launch or service)")
-        except Exception as e:
-            rospy.logerr("Failed to start gmapping: %s", str(e))
-            self.mapping_active = False
+    #     rospy.loginfo("Starting gmapping...")
+    #     try:
+    #         # Launch gmapping via roslaunch
+    #         # Note: In production, you might want to use a more robust method
+    #         # For now, we'll assume gmapping is launched externally or via service
+    #         # Alternative: use dynamic_reconfigure or service calls if available
+    #         self.mapping_active = True
+    #         self.mapping_complete = False
+    #         rospy.loginfo("Gmapping started (assumes external launch or service)")
+    #     except Exception as e:
+    #         rospy.logerr("Failed to start gmapping: %s", str(e))
+    #         self.mapping_active = False
     
-    def _stop_gmapping(self):
-        """Stop gmapping SLAM process."""
-        if not self.mapping_active:
-            return
+    # def _stop_gmapping(self):
+    #     """Stop gmapping SLAM process."""
+    #     if not self.mapping_active:
+    #         return
         
-        rospy.loginfo("Stopping gmapping...")
-        # In practice, you might need to kill the process or call a service
-        # For now, we just mark it as inactive
-        self.mapping_active = False
-        rospy.loginfo("Gmapping stopped")
+    #     rospy.loginfo("Stopping gmapping...")
+    #     # In practice, you might need to kill the process or call a service
+    #     # For now, we just mark it as inactive
+    #     self.mapping_active = False
+    #     rospy.loginfo("Gmapping stopped")
     
-    # ========================================================================
-    # AMCL MANAGEMENT
-    # ========================================================================
+    # # ========================================================================
+    # # AMCL MANAGEMENT
+    # # ========================================================================
     
-    def _start_amcl(self):
-        """Start AMCL localization after mapping is complete."""
-        if self.amcl_active:
-            rospy.logwarn("AMCL already active")
-            return
+    # def _start_amcl(self):
+    #     """Start AMCL localization after mapping is complete."""
+    #     if self.amcl_active:
+    #         rospy.logwarn("AMCL already active")
+    #         return
         
-        if not self.mapping_complete:
-            rospy.logwarn("Cannot start AMCL: mapping not complete")
-            return
+    #     if not self.mapping_complete:
+    #         rospy.logwarn("Cannot start AMCL: mapping not complete")
+    #         return
         
-        rospy.loginfo("Starting AMCL localization...")
-        try:
-            # Similar to gmapping, AMCL is typically launched via launch file
-            # Mark as active (assumes external launch or service)
-            self.amcl_active = True
-            rospy.loginfo("AMCL started (assumes external launch or service)")
-        except Exception as e:
-            rospy.logerr("Failed to start AMCL: %s", str(e))
-            self.amcl_active = False
+    #     rospy.loginfo("Starting AMCL localization...")
+    #     try:
+    #         # Similar to gmapping, AMCL is typically launched via launch file
+    #         # Mark as active (assumes external launch or service)
+    #         self.amcl_active = True
+    #         rospy.loginfo("AMCL started (assumes external launch or service)")
+    #     except Exception as e:
+    #         rospy.logerr("Failed to start AMCL: %s", str(e))
+    #         self.amcl_active = False
     
-    # ========================================================================
-    # YOLO MANAGEMENT
-    # ========================================================================
+    # # ========================================================================
+    # # YOLO MANAGEMENT
+    # # ========================================================================
     
-    def _enable_yolo(self):
-        """Enable YOLO object detection (only in GUIDING state)."""
-        if self.yolo_enabled:
-            return
+    # def _enable_yolo(self):
+    #     """Enable YOLO object detection (only in GUIDING state)."""
+    #     if self.yolo_enabled:
+    #         return
         
-        rospy.loginfo("Enabling YOLO for human tracking...")
-        msg = Bool()
-        msg.data = True
-        self.yolo_enable_pub.publish(msg)
-        self.yolo_enabled = True
+    #     rospy.loginfo("Enabling YOLO for human tracking...")
+    #     msg = Bool()
+    #     msg.data = True
+    #     self.yolo_enable_pub.publish(msg)
+    #     self.yolo_enabled = True
     
-    def _disable_yolo(self):
-        """Disable YOLO object detection."""
-        if not self.yolo_enabled:
-            return
+    # def _disable_yolo(self):
+    #     """Disable YOLO object detection."""
+    #     if not self.yolo_enabled:
+    #         return
         
-        rospy.loginfo("Disabling YOLO...")
-        msg = Bool()
-        msg.data = False
-        self.yolo_enable_pub.publish(msg)
-        self.yolo_enabled = False
+    #     rospy.loginfo("Disabling YOLO...")
+    #     msg = Bool()
+    #     msg.data = False
+    #     self.yolo_enable_pub.publish(msg)
+    #     self.yolo_enabled = False
     
-    # ========================================================================
-    # NAVIGATION MANAGEMENT
-    # ========================================================================
+    # # ========================================================================
+    # # NAVIGATION MANAGEMENT
+    # # ========================================================================
     
-    def _get_navigation_goal(self):
-        """
-        Get navigation goal from parameter or return None.
+    # def _get_navigation_goal(self):
+    #     """
+    #     Get navigation goal from parameter or return None.
         
-        Returns:
-            PoseStamped or None
-        """
-        # Try to get goal from parameter server
-        try:
-            goal = PoseStamped()
-            goal.header.frame_id = rospy.get_param('~goal_frame_id', 'map')
-            goal.pose.position.x = rospy.get_param('~goal_x', 0.0)
-            goal.pose.position.y = rospy.get_param('~goal_y', 0.0)
-            goal.pose.position.z = rospy.get_param('~goal_z', 0.0)
-            goal.pose.orientation.w = rospy.get_param('~goal_w', 1.0)
-            return goal
-        except:
-            return None
+    #     Returns:
+    #         PoseStamped or None
+    #     """
+    #     # Try to get goal from parameter server
+    #     try:
+    #         goal = PoseStamped()
+    #         goal.header.frame_id = rospy.get_param('~goal_frame_id', 'map')
+    #         goal.pose.position.x = rospy.get_param('~goal_x', 0.0)
+    #         goal.pose.position.y = rospy.get_param('~goal_y', 0.0)
+    #         goal.pose.position.z = rospy.get_param('~goal_z', 0.0)
+    #         goal.pose.orientation.w = rospy.get_param('~goal_w', 1.0)
+    #         return goal
+    #     except:
+    #         return None
     
-    def _send_navigation_goal(self, goal):
-        """
-        Send navigation goal to move_base.
+    # def _send_navigation_goal(self, goal):
+    #     """
+    #     Send navigation goal to move_base.
         
-        Args:
-            goal: PoseStamped or MoveBaseGoal
-        """
-        if self.move_base_client is None:
-            self._init_move_base_client()
+    #     Args:
+    #         goal: PoseStamped or MoveBaseGoal
+    #     """
+    #     if self.move_base_client is None:
+    #         self._init_move_base_client()
         
-        if self.move_base_client is None:
-            rospy.logerr("Cannot send goal: move_base client not available")
-            return
+    #     if self.move_base_client is None:
+    #         rospy.logerr("Cannot send goal: move_base client not available")
+    #         return
         
-        try:
-            # Convert PoseStamped to MoveBaseGoal if needed
-            if isinstance(goal, PoseStamped):
-                mb_goal = MoveBaseGoal()
-                mb_goal.target_pose = goal
-            else:
-                mb_goal = goal
+    #     try:
+    #         # Convert PoseStamped to MoveBaseGoal if needed
+    #         if isinstance(goal, PoseStamped):
+    #             mb_goal = MoveBaseGoal()
+    #             mb_goal.target_pose = goal
+    #         else:
+    #             mb_goal = goal
             
-            self.current_goal = mb_goal
-            self.move_base_client.send_goal(mb_goal)
-            rospy.loginfo("Navigation goal sent: (%.2f, %.2f)", 
-                         mb_goal.target_pose.pose.position.x,
-                         mb_goal.target_pose.pose.position.y)
-        except Exception as e:
-            rospy.logerr("Failed to send navigation goal: %s", str(e))
+    #         self.current_goal = mb_goal
+    #         self.move_base_client.send_goal(mb_goal)
+    #         rospy.loginfo("Navigation goal sent: (%.2f, %.2f)", 
+    #                      mb_goal.target_pose.pose.position.x,
+    #                      mb_goal.target_pose.pose.position.y)
+    #     except Exception as e:
+    #         rospy.logerr("Failed to send navigation goal: %s", str(e))
     
-    def _cancel_navigation_goals(self):
-        """Cancel all active navigation goals."""
-        if self.move_base_client is not None:
-            try:
-                self.move_base_client.cancel_all_goals()
-                rospy.loginfo("Cancelled all navigation goals")
-            except Exception as e:
-                rospy.logwarn("Failed to cancel navigation goals: %s", str(e))
-        self.current_goal = None
-        self.goal_reached = False
-        self.navigation_error = False
+    # def _cancel_navigation_goals(self):
+    #     """Cancel all active navigation goals."""
+    #     if self.move_base_client is not None:
+    #         try:
+    #             self.move_base_client.cancel_all_goals()
+    #             rospy.loginfo("Cancelled all navigation goals")
+    #         except Exception as e:
+    #             rospy.logwarn("Failed to cancel navigation goals: %s", str(e))
+    #     self.current_goal = None
+    #     self.goal_reached = False
+    #     self.navigation_error = False
     
-    # ========================================================================
-    # GUIDING SEQUENCE MANAGEMENT
-    # ========================================================================
+    # # ========================================================================
+    # # GUIDING SEQUENCE MANAGEMENT
+    # # ========================================================================
     
-    def _start_guiding_sequence(self):
-        """Initialize guiding sequence with waypoints."""
-        # Load waypoints from parameter or service
-        # For now, use a simple example
-        try:
-            waypoints_param = rospy.get_param('~guiding_waypoints', [])
-            if waypoints_param:
-                self.guiding_waypoints = waypoints_param
-            else:
-                rospy.logwarn("No waypoints configured for guiding")
-                self.guiding_waypoints = []
-        except:
-            self.guiding_waypoints = []
+    # def _start_guiding_sequence(self):
+    #     """Initialize guiding sequence with waypoints."""
+    #     # Load waypoints from parameter or service
+    #     # For now, use a simple example
+    #     try:
+    #         waypoints_param = rospy.get_param('~guiding_waypoints', [])
+    #         if waypoints_param:
+    #             self.guiding_waypoints = waypoints_param
+    #         else:
+    #             rospy.logwarn("No waypoints configured for guiding")
+    #             self.guiding_waypoints = []
+    #     except:
+    #         self.guiding_waypoints = []
         
-        self.current_waypoint_index = 0
-        if self.guiding_waypoints:
-            self._navigate_to_next_waypoint()
-        else:
-            rospy.logwarn("No waypoints available, staying in GUIDING state")
+    #     self.current_waypoint_index = 0
+    #     if self.guiding_waypoints:
+    #         self._navigate_to_next_waypoint()
+    #     else:
+    #         rospy.logwarn("No waypoints available, staying in GUIDING state")
     
-    def _navigate_to_next_waypoint(self):
-        """Navigate to the next waypoint in the guiding sequence."""
-        if self.current_waypoint_index >= len(self.guiding_waypoints):
-            rospy.loginfo("All waypoints completed!")
-            self.transition_to(RobotState.IDLE)
-            return
+    # def _navigate_to_next_waypoint(self):
+    #     """Navigate to the next waypoint in the guiding sequence."""
+    #     if self.current_waypoint_index >= len(self.guiding_waypoints):
+    #         rospy.loginfo("All waypoints completed!")
+    #         self.transition_to(RobotState.IDLE)
+    #         return
         
-        waypoint = self.guiding_waypoints[self.current_waypoint_index]
-        rospy.loginfo("Navigating to waypoint %d/%d: (%.2f, %.2f)",
-                     self.current_waypoint_index + 1,
-                     len(self.guiding_waypoints),
-                     waypoint[0], waypoint[1])
+    #     waypoint = self.guiding_waypoints[self.current_waypoint_index]
+    #     rospy.loginfo("Navigating to waypoint %d/%d: (%.2f, %.2f)",
+    #                  self.current_waypoint_index + 1,
+    #                  len(self.guiding_waypoints),
+    #                  waypoint[0], waypoint[1])
         
-        # Create goal from waypoint
-        goal = PoseStamped()
-        goal.header.frame_id = 'map'
-        goal.header.stamp = rospy.Time.now()
-        goal.pose.position.x = waypoint[0]
-        goal.pose.position.y = waypoint[1]
-        goal.pose.position.z = 0.0
-        goal.pose.orientation.w = waypoint[2] if len(waypoint) > 2 else 1.0
+    #     # Create goal from waypoint
+    #     goal = PoseStamped()
+    #     goal.header.frame_id = 'map'
+    #     goal.header.stamp = rospy.Time.now()
+    #     goal.pose.position.x = waypoint[0]
+    #     goal.pose.position.y = waypoint[1]
+    #     goal.pose.position.z = 0.0
+    #     goal.pose.orientation.w = waypoint[2] if len(waypoint) > 2 else 1.0
         
-        self._send_navigation_goal(goal)
-        self.transition_to(RobotState.NAVIGATING)
+    #     self._send_navigation_goal(goal)
+    #     self.transition_to(RobotState.NAVIGATING)
     
-    def _handle_guiding_waypoint_reached(self):
-        """Handle completion of a waypoint during guiding."""
-        self.current_waypoint_index += 1
-        if self.current_waypoint_index < len(self.guiding_waypoints):
-            # Wait a bit before next waypoint (optional)
-            rospy.sleep(1.0)
-            self._navigate_to_next_waypoint()
-        else:
-            rospy.loginfo("Guiding tour complete!")
-            self.transition_to(RobotState.IDLE)
+    # def _handle_guiding_waypoint_reached(self):
+    #     """Handle completion of a waypoint during guiding."""
+    #     self.current_waypoint_index += 1
+    #     if self.current_waypoint_index < len(self.guiding_waypoints):
+    #         # Wait a bit before next waypoint (optional)
+    #         rospy.sleep(1.0)
+    #         self._navigate_to_next_waypoint()
+    #     else:
+    #         rospy.loginfo("Guiding tour complete!")
+    #         self.transition_to(RobotState.IDLE)
     
-    # ========================================================================
-    # UTILITY FUNCTIONS
-    # ========================================================================
+    # # ========================================================================
+    # # UTILITY FUNCTIONS
+    # # ========================================================================
     
-    def _stop_all_motion(self):
-        """Stop all robot motion by publishing zero velocity."""
-        zero_vel = Twist()
-        self.cmd_vel_pub.publish(zero_vel)
+    # def _stop_all_motion(self):
+    #     """Stop all robot motion by publishing zero velocity."""
+    #     zero_vel = Twist()
+    #     self.cmd_vel_pub.publish(zero_vel)
     
-    def _shutdown_handler(self):
-        """Cleanup on node shutdown."""
-        rospy.loginfo("Shutting down Tour Guide Controller...")
-        self._cancel_navigation_goals()
-        self._stop_gmapping()
-        self._disable_yolo()
-        self._stop_all_motion()
+    # def _shutdown_handler(self):
+    #     """Cleanup on node shutdown."""
+    #     rospy.loginfo("Shutting down Tour Guide Controller...")
+    #     self._cancel_navigation_goals()
+    #     self._stop_gmapping()
+    #     self._disable_yolo()
+    #     self._stop_all_motion()
 
 
 
