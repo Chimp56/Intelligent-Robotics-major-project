@@ -34,7 +34,8 @@ class RobotState(Enum):
     """Enumeration of all possible robot states."""
     IDLE = "IDLE" # Robot is idle, waiting for commands.
     MAPPING = "MAPPING" # Robot is mapping the environment.
-    GUIDING = "GUIDING" # Robot is guiding a user to a goal.
+    NAVIGATING = "NAVIGATING" # Robot is navigating to a goal.
+    GUIDING = "GUIDING" # Robot is guiding a user to a sequence of goals.
     MANUAL = "MANUAL" # Robot is in manual mode (teleop).
     STOP = "STOP" # Robot is stopped, emergency stop.
     RECOVERY = "RECOVERY" # Robot is in recovery mode, recovering from an error.
@@ -145,6 +146,7 @@ class Controller:
         # ====================================================================
         rospy.Service(SERVICE_START_MAPPING, Empty, self._srv_start_mapping)
         rospy.Service(SERVICE_STOP_MAPPING, Empty, self._srv_stop_mapping)
+        rospy.Service(SERVICE_START_NAVIGATION, Empty, self._srv_start_navigation)
         rospy.Service(SERVICE_START_GUIDING, Empty, self._srv_start_guiding)
         rospy.Service(SERVICE_EMERGENCY_STOP, Empty, self._srv_emergency_stop)
         rospy.Service(SERVICE_RESUME, Empty, self._srv_resume)
@@ -166,7 +168,7 @@ class Controller:
     def _init_move_base_client(self):
         """Initialize the move_base action client."""
         try:
-            self.move_base_client = actionlib.SimpleActionClient('move_base_node', MoveBaseAction)
+            self.move_base_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
             rospy.loginfo("Waiting for move_base action server...")
             if self.move_base_client.wait_for_server(timeout=rospy.Duration(5.0)):
                 rospy.loginfo("Connected to move_base action server")
@@ -489,6 +491,8 @@ class Controller:
                 self._handle_recovery()
             elif self.state == RobotState.STUCK:
                 self._handle_stuck()
+            elif self.state == RobotState.TEST_CIRCLE:
+                self._handle_test_circle()  
         except Exception as e:
             rospy.logerr("Error in state machine: %s", str(e))
     
