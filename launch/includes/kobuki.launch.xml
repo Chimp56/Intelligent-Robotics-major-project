@@ -15,10 +15,10 @@
   <param name="robot_description" command="$(arg urdf_file)"/>
 
   <!-- Publish TF from URDF -->
-  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+  <!-- <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
     <param name="publish_frequency" value="30.0"/>
   </node>
-  <node pkg="joint_state_publisher" type="joint_state_publisher" name="joint_state_publisher" />
+  <node pkg="joint_state_publisher" type="joint_state_publisher" name="joint_state_publisher" /> -->
 
   <!-- Spawn into Gazebo -->
   <node name="spawn_turtlebot_model" pkg="gazebo_ros" type="spawn_model"
