@@ -85,7 +85,7 @@
       <elevation>0</elevation>
       <heading_deg>0</heading_deg>
     </spherical_coordinates>
-    <model name='project2'>
+    <model name='tour_guide'>
       <model name='room_hallway'>
         <pose frame=''>1e-06 -0 0 0 -0 0</pose>
         <link name='Wall_0'>
@@ -514,7 +514,7 @@
           <wrench>0 0 0 0 -0 0</wrench>
         </link>
       </model>
-      <model name='project2'>
+      <model name='tour_guide'>
         <pose frame=''>-2.82793 2.105 0 0 0 -0.001491</pose>
         <scale>1 1 1</scale>
         <model name='room_hallway'>
