@@ -1564,6 +1564,7 @@ class TestController:
         self.cmd_vel_pub = rospy.Publisher('/cmd_vel_mux/input/navi', Twist, queue_size=10)
         
         # Publish initial state
+        self.state = RobotState.IDLE
         self._publish_state()
 
     def _run_state_machine(self, event):

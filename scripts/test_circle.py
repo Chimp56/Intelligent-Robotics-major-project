@@ -29,6 +29,7 @@ class CircleTestNode:
         self.linear_speed = rospy.get_param('~linear_speed', 0.15)  # m/s
         self.angular_speed = rospy.get_param('~angular_speed', 1)  # rad/s
         self.rate_hz = rospy.get_param('~rate', 10.0)  # Hz
+        self.state = RobotState.IDLE
         
         # Publisher
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
