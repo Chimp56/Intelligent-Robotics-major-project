@@ -1567,6 +1567,12 @@ class TestController:
         self.state = RobotState.IDLE
         self._publish_state()
 
+        self.state_machine_timer = rospy.Timer(rospy.Duration(0.1), self._run_state_machine)
+
+        rospy.loginfo("Test Controller: Initialization complete. Current state: %s", self.state.value)
+
+        rospy.on_shutdown(self._shutdown_handler)
+
     def _run_state_machine(self, event):
         """
         Main state machine execution loop.
