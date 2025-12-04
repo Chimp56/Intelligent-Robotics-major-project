@@ -42,6 +42,12 @@ roslaunch turtlebot_teleop keyboard_teleop.launch
 
 https://wiki.ros.org/cmd_vel_mux
 
+### References
+
+https://github.com/fazildgr8/ros_autonomous_slam
+https://www.youtube.com/watch?v=Zjb_2krr1Xg
+
+
 ### Vincent quick start up
 
 ```

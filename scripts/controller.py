@@ -1547,13 +1547,73 @@ class TourGuideController:
         self._stop_all_motion()
 
 
+# TestController class
+class TestController:
+    """
+    Test controller for testing the controller.
+    """
+    def __init__(self):
+        """Initialize the test controller."""
+        rospy.init_node("test_controller", anonymous=False)
+        rospy.loginfo("Test Controller: Initializing...")
+        
+        # ====================================================================
+        # ROS PUBLISHERS
+        # ====================================================================
+        self.state_pub = rospy.Publisher(STATE_TOPIC, String, queue_size=10, latch=True)
+        self.cmd_vel_pub = rospy.Publisher('/cmd_vel_mux/input/navi', Twist, queue_size=10)
+        
+        # Publish initial state
+        self._publish_state()
+
+    def _run_state_machine(self, event):
+        """
+        Main state machine execution loop.
+        Called periodically by timer.
+        
+        Args:
+            event: TimerEvent (unused)
+        """
+        try:
+            if self.state == RobotState.IDLE:
+                self._handle_idle()
+            elif self.state == RobotState.TEST_CIRCLE:
+                self._handle_test_circle()
+        except Exception as e:
+            rospy.logerr("Error in state machine: %s", str(e))
+
+    def _transition_to(self, new_state):
+        """Transition to a new state."""
+        rospy.loginfo("Transitioning to state: %s", new_state.value)
+        self.state = new_state
+        self._publish_state()
+        
+    def _publish_state(self):
+        """Publish current state to ROS topic."""
+        msg = String()
+        msg.data = self.state.value
+        self.state_pub.publish(msg)
+    
+    def _handle_idle(self):
+        """Handle IDLE state - robot is idle."""
+        rospy.loginfo("IDLE: Robot is idle")
+        self._transition_to(RobotState.TEST_CIRCLE)
+    
+    def _handle_test_circle(self):
+        """Handle TEST_CIRCLE state - robot is testing circle motion."""
+        rospy.loginfo("TEST_CIRCLE: Robot is testing circle motion.")
+
+    def _shutdown_handler(self):
+        """Cleanup on node shutdown."""
+        rospy.loginfo("Shutting down Test Controller...")
+
 # ============================================================================
 # MAIN ENTRY POINT
 # ============================================================================
 
 if __name__ == "__main__":
     try:
-        controller = Controller()
+        controller = TestController()
         rospy.spin()
     except rospy.ROSInterruptException:
         rospy.loginfo("Tour Guide Controller interrupted")

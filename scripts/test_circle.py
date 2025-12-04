@@ -11,6 +11,8 @@ Publishes:
 
 import rospy
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+from controller import RobotState, STATE_TOPIC
 
 # Topic for velocity commands
 CMD_VEL_TOPIC = '/cmd_vel_mux/input/navi'
@@ -30,6 +32,10 @@ class CircleTestNode:
         
         # Publisher
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
+        self.state_pub = rospy.Publisher(STATE_TOPIC, String, queue_size=10, latch=True)
+
+        # Subscriber
+        self.state_sub = rospy.Subscriber(STATE_TOPIC, String, self._cb_state)
         
         rospy.loginfo("Circle Test Node: Starting circular motion")
         rospy.loginfo("  Linear speed: %.2f m/s", self.linear_speed)
@@ -43,25 +49,30 @@ class CircleTestNode:
         rate = rospy.Rate(self.rate_hz)
         
         while not rospy.is_shutdown():
-            # Create twist message for circular motion
-            twist = Twist()
-            twist.linear.x = self.linear_speed
-            twist.linear.y = 0.0
-            twist.linear.z = 0.0
-            twist.angular.x = 0.0
-            twist.angular.y = 0.0
-            twist.angular.z = self.angular_speed  # Positive = counterclockwise
-            
-            # Publish command
-            self.cmd_vel_pub.publish(twist)
-            
-            rospy.loginfo_throttle(5, "Circle Test: Moving in circle (linear=%.2f, angular=%.2f)",
-                                 self.linear_speed, self.angular_speed)
-            
-            rate.sleep()
+            if self.state == RobotState.TEST_CIRCLE:
+                # Create twist message for circular motion
+                twist = Twist()
+                twist.linear.x = self.linear_speed
+                twist.linear.y = 0.0
+                twist.linear.z = 0.0
+                twist.angular.x = 0.0
+                twist.angular.y = 0.0
+                twist.angular.z = self.angular_speed  # Positive = counterclockwise
+                
+                # Publish command
+                self.cmd_vel_pub.publish(twist)
+                
+                rospy.loginfo_throttle(5, "Circle Test: Moving in circle (linear=%.2f, angular=%.2f)",
+                                    self.linear_speed, self.angular_speed)
+                
+                rate.sleep()
         
         # Stop robot on shutdown
         self.stop_robot()
+
+    def _cb_state(self, msg):
+        """Callback for state messages."""
+        self.state = RobotState(msg.data)
     
     def stop_robot(self):
         """Stop the robot by publishing zero velocity."""
