@@ -1620,7 +1620,7 @@ class TestController:
 
 if __name__ == "__main__":
     try:
-        controller = TestController()
+        controller = Controller()
         rospy.spin()
     except rospy.ROSInterruptException:
         rospy.loginfo("Tour Guide Controller interrupted")
