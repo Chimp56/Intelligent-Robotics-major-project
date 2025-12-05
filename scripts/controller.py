@@ -194,7 +194,27 @@ class Controller:
         Args:
             msg: geometry_msgs/Twist - teleop commands
         """
-        self.transition_to(RobotState.MANUAL)
+        if self._is_nonzero_twist(msg):
+            self.transition_to(RobotState.MANUAL)
+    
+    def _is_nonzero_twist(self, msg):
+        """
+        Check if a Twist message has any non-zero velocity components.
+        Uses a small epsilon to account for floating point precision.
+        
+        Args:
+            msg: geometry_msgs/Twist - velocity command message
+        
+        Returns:
+            True if any component is non-zero, False otherwise
+        """
+        TELEOP_EPS = 1e-3  # Epsilon threshold for detecting non-zero velocities
+        return (abs(msg.linear.x) > TELEOP_EPS or
+                abs(msg.linear.y) > TELEOP_EPS or
+                abs(msg.linear.z) > TELEOP_EPS or
+                abs(msg.angular.x) > TELEOP_EPS or
+                abs(msg.angular.y) > TELEOP_EPS or
+                abs(msg.angular.z) > TELEOP_EPS)
 
     def _cb_mapping_done(self, msg):
         """
