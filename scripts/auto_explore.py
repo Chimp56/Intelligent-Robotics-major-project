@@ -284,10 +284,11 @@ class AutoExplore:
             # Track when we first detected no frontiers
             if self.last_no_frontier_time is None:
                 self.last_no_frontier_time = rospy.Time.now()
-            # If no frontiers for 10 seconds, consider exploration complete and save map
-            elif (rospy.Time.now() - self.last_no_frontier_time).to_sec() > 10.0:
+            # If no frontiers for exploration_timeout_time seconds, consider exploration complete and save map
+            exploration_timeout_time = 30.0
+            if (rospy.Time.now() - self.last_no_frontier_time).to_sec() > exploration_timeout_time:
                 if not self.map_saved:
-                    rospy.loginfo("Auto Explore: No frontiers for 10 seconds, saving map...")
+                    rospy.loginfo("Auto Explore: No frontiers for %d seconds, saving map...", exploration_timeout_time)
                     self._save_map()
             self._wander_explore()
             return
