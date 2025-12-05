@@ -483,7 +483,7 @@ class AutoExplore:
         
         # Log progress
         progress_pct = (self.initial_rotation_accumulated / self.initial_rotation_target) * 100
-        rospy.loginfo_throttle(2, "Auto Explore: Initial rotation progress: %.1f%% (%.1f° / 720°)", 
+        rospy.loginfo_throttle(2, "Auto Explore: Initial rotation progress: %.1f%% (%.1f degrees / 720 degrees)", 
                               progress_pct, math.degrees(self.initial_rotation_accumulated))
 
     def _wander_explore(self):
