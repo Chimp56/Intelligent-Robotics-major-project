@@ -452,8 +452,6 @@ class Controller:
             self._start_guiding_sequence()
         elif state == RobotState.MANUAL:
             pass
-            self._cancel_navigation_goals()
-            self._disable_yolo()
         elif state == RobotState.STOP:
             self._cancel_navigation_goals()
             self._stop_all_motion()
@@ -805,13 +803,33 @@ class Controller:
     #     zero_vel = Twist()
     #     self.cmd_vel_pub.publish(zero_vel)
     
+    def _cancel_navigation_goals(self):
+        """Cancel all active navigation goals."""
+        if self.move_base_client is not None:
+            try:
+                self.move_base_client.cancel_all_goals()
+                rospy.loginfo("Cancelled all navigation goals")
+            except Exception as e:
+                rospy.logwarn("Failed to cancel navigation goals: %s", str(e))
+        if hasattr(self, 'current_goal'):
+            self.current_goal = None
+        if hasattr(self, 'goal_reached'):
+            self.goal_reached = False
+        if hasattr(self, 'navigation_error'):
+            self.navigation_error = False
+    
+    def _stop_all_motion(self):
+        """Stop all robot motion by publishing zero velocity."""
+        zero_vel = Twist()
+        self.cmd_vel_pub.publish(zero_vel)
+    
     def _shutdown_handler(self):
         """Cleanup on node shutdown."""
         rospy.loginfo("Shutting down Tour Guide Controller...")
         self._cancel_navigation_goals()
         # self._stop_gmapping()
         # self._disable_yolo()
-        # self._stop_all_motion()
+        self._stop_all_motion()
 
 
 
