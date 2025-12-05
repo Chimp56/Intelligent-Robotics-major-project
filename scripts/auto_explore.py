@@ -1268,24 +1268,37 @@ class AutoExplore:
         rospy.loginfo("Auto Explore: Saving map to: %s", map_path)
         
         try:
-            # Use map_saver command
+            # Use map_saver command (Python 2.7 compatible)
             cmd = ['rosrun', 'map_server', 'map_saver', '-f', map_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            # Use Popen for Python 2.7 compatibility
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
-            if result.returncode == 0:
+            # Wait for completion with timeout (Python 2.7 compatible)
+            import time
+            timeout = 10.0
+            start_time = time.time()
+            while process.poll() is None:
+                if time.time() - start_time > timeout:
+                    process.terminate()
+                    rospy.logwarn("Auto Explore: Map save operation timed out")
+                    return False
+                rospy.sleep(0.1)
+            
+            # Get return code and output
+            returncode = process.returncode
+            stdout, stderr = process.communicate()
+            
+            if returncode == 0:
                 rospy.loginfo("Auto Explore: Map saved successfully!")
                 rospy.loginfo("  - %s.yaml", map_path)
                 rospy.loginfo("  - %s.pgm", map_path)
                 self.map_saved = True
                 return True
             else:
-                rospy.logwarn("Auto Explore: Failed to save map: %s", result.stderr)
+                rospy.logwarn("Auto Explore: Failed to save map: %s", stderr)
                 rospy.logwarn("Auto Explore: You can manually save the map using:")
                 rospy.logwarn("  rosrun map_server map_saver -f %s", map_path)
                 return False
-        except subprocess.TimeoutExpired:
-            rospy.logwarn("Auto Explore: Map save operation timed out")
-            return False
         except Exception as e:
             rospy.logwarn("Auto Explore: Error saving map: %s", str(e))
             rospy.logwarn("Auto Explore: You can manually save the map using:")
