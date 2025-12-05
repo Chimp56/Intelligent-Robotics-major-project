@@ -525,7 +525,7 @@ class Controller:
         # If there are tour waypoints available, start GUIDING instead.
         if getattr(self, "guiding_waypoints", None):
             if len(self.guiding_waypoints) > 0:
-                rospy.loginfo("IDLE: waypoints available → switching to GUIDING")
+                rospy.loginfo("IDLE: waypoints available switching to GUIDING")
                 self.transition_to(RobotState.GUIDING)
 
     
