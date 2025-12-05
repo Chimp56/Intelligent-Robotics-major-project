@@ -539,13 +539,15 @@ class AutoExplore:
         if self.laser_data is not None:
             ranges = self.laser_data.ranges
             if ranges:
-                min_range = min([r for r in ranges if r > 0 and not math.isnan(r)])
-                if min_range < MIN_OBSTACLE_DISTANCE * 0.5:  # Very close obstacle
-                    rospy.logwarn("Auto Explore: Obstacle very close during rotation, pausing...")
-                    twist = Twist()  # Stop
-                    self.cmd_vel_pub.publish(twist)
-                    rospy.sleep(0.5)
-                    return
+                valid_ranges = [r for r in ranges if r > 0 and not math.isnan(r)]
+                if valid_ranges:  # Check if we have any valid ranges
+                    min_range = min(valid_ranges)
+                    if min_range < MIN_OBSTACLE_DISTANCE * 0.5:  # Very close obstacle
+                        rospy.logwarn("Auto Explore: Obstacle very close during rotation, pausing...")
+                        twist = Twist()  # Stop
+                        self.cmd_vel_pub.publish(twist)
+                        rospy.sleep(0.5)
+                        return
         
         # Rotate counter-clockwise at moderate speed
         twist = Twist()
