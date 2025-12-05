@@ -116,6 +116,8 @@ class AutoExplore:
         try:
             if self.move_base_client is None:
                 self.move_base_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+                # Register a safe feedback callback to prevent AttributeError
+                self.move_base_client.register_feedback_cb(self._move_base_feedback_cb)
             rospy.loginfo("Auto Explore: Waiting for move_base action server...")
             if self.move_base_client.wait_for_server(timeout=rospy.Duration(5.0)):
                 rospy.loginfo("Auto Explore: Connected to move_base action server")
@@ -130,7 +132,15 @@ class AutoExplore:
             import traceback
             rospy.logwarn(traceback.format_exc())
             self.move_base_client = None
-            return False
+    
+    def _move_base_feedback_cb(self, goal_handle, feedback):
+        """Safe feedback callback for move_base to prevent AttributeError.
+        
+        This callback is registered to prevent the AttributeError that occurs
+        when feedback arrives before the goal handle is fully initialized.
+        """
+        # We don't need to process feedback, just having this callback prevents the error
+        pass
 
     def run(self):
         """
@@ -726,9 +736,11 @@ class AutoExplore:
             if state == GoalStatus.REJECTED:
                 rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) was immediately rejected by move_base. Marking as visited.", 
                            world_x, world_y)
-                # Mark as visited to avoid retrying
+                # Mark as visited to avoid retrying (use same precision as selection)
                 frontier_key = (int(world_x * 2), int(world_y * 2))
                 self.visited_frontiers.add(frontier_key)
+                rospy.loginfo("Auto Explore: Marked rejected frontier at (%.2f, %.2f) as visited (key: %s)", 
+                            world_x, world_y, frontier_key)
                 self._cancel_current_goal()
                 return
             
