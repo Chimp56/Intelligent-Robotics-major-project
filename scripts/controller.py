@@ -519,7 +519,15 @@ class Controller:
         """Handle IDLE state - robot waits for commands."""
         # Robot is idle, waiting for user commands or state transitions
         rospy.loginfo_throttle(10, "IDLE: Waiting for commands...")
-        self.transition_to(RobotState.MAPPING)
+
+        # IMPORTANT CHANGE:
+        # Do NOT automatically start mapping anymore.
+        # If there are tour waypoints available, start GUIDING instead.
+        if getattr(self, "guiding_waypoints", None):
+            if len(self.guiding_waypoints) > 0:
+                rospy.loginfo("IDLE: waypoints available → switching to GUIDING")
+                self.transition_to(RobotState.GUIDING)
+
     
     def _handle_mapping(self):
         """Handle MAPPING state - robot explores and builds map."""
