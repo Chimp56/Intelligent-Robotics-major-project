@@ -36,21 +36,17 @@ class AutoExplore:
         rospy.init_node('auto_explore', anonymous=False)
         rospy.loginfo("Auto Explore: Initializing...")
         
+        # Initialize all instance variables BEFORE creating subscribers
+        # (to avoid race conditions in callbacks)
+        
         # State management
         self.state = RobotState.IDLE
-        self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
-        self.state_pub = rospy.Publisher(STATE_TOPIC, String, queue_size=10, latch=True)
-        self.state_sub = rospy.Subscriber(STATE_TOPIC, String, self._cb_state)
         
         # Map and pose data
         self.map_data = None
         self.map_info = None
         self.robot_pose = None
         self.tf_listener = tf.TransformListener()
-        
-        # Subscribers
-        self.map_sub = rospy.Subscriber('/map', OccupancyGrid, self._cb_map)
-        self.odom_sub = rospy.Subscriber('/odom', Odometry, self._cb_odom)
         
         # Move base action client for navigation
         self.move_base_client = None
@@ -61,6 +57,15 @@ class AutoExplore:
         self.exploring = False
         self.last_frontier_check = rospy.Time.now()
         self.visited_frontiers = set()
+        
+        # Now create publishers and subscribers (after all variables are initialized)
+        self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
+        self.state_pub = rospy.Publisher(STATE_TOPIC, String, queue_size=10, latch=True)
+        self.state_sub = rospy.Subscriber(STATE_TOPIC, String, self._cb_state)
+        
+        # Subscribers
+        self.map_sub = rospy.Subscriber('/map', OccupancyGrid, self._cb_map)
+        self.odom_sub = rospy.Subscriber('/odom', Odometry, self._cb_odom)
         
         # Initialize move_base client
         self._init_move_base_client()
@@ -430,6 +435,10 @@ class AutoExplore:
         Callback for state messages
         """
         try:
+            # Safety check: ensure attributes exist (in case callback is called during init)
+            if not hasattr(self, 'current_goal'):
+                return
+                
             old_state = self.state
             new_state = RobotState(msg.data)
             if old_state != new_state:
@@ -447,6 +456,9 @@ class AutoExplore:
                     self.current_goal = None
         except ValueError as e:
             rospy.logwarn("Auto Explore: Unknown state: %s (error: %s)", msg.data, str(e))
+        except AttributeError as e:
+            # Handle case where callback is called before full initialization
+            rospy.logwarn_throttle(1, "Auto Explore: State callback called before initialization complete: %s", str(e))
 
 
 if __name__ == '__main__':
