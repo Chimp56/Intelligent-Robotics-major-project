@@ -147,13 +147,10 @@ class AutoExplore:
                     # Always check obstacles before publishing any command
                     obstacle_dist = self._get_obstacle_distance_ahead()
                     if obstacle_dist is not None and obstacle_dist < MIN_OBSTACLE_DISTANCE:
-                        # Emergency stop - obstacle too close
-                        rospy.logwarn_throttle(1, "Auto Explore: EMERGENCY STOP - obstacle at %.2f m!", obstacle_dist)
-                        emergency_twist = Twist()
-                        emergency_twist.linear.x = 0.0
-                        emergency_twist.angular.z = 0.0
-                        self.cmd_vel_pub.publish(emergency_twist)
-                        self.wander_twist = emergency_twist
+                        # Turn away from obstacle
+                        twist = Twist()
+                        twist.angular.z = 0.5 * -1
+                        self.cmd_vel_pub.publish(twist)
                     elif self.wander_twist is not None:
                         # Adjust speed if approaching obstacle
                         if obstacle_dist is not None and obstacle_dist < SAFE_STOPPING_DISTANCE and self.wander_direction == 1:
@@ -643,7 +640,28 @@ class AutoExplore:
             self.visited_frontiers.add(frontier_key)
             return
         
-        # Create goal
+        # Wait for transform to be available before sending goal
+        # This prevents TF extrapolation errors in move_base
+        try:
+            # Wait for transform with a reasonable timeout
+            self.tf_listener.waitForTransform("map", "odom", rospy.Time(0), rospy.Duration(2.0))
+            # Get the latest transform to ensure it's available
+            (trans, rot) = self.tf_listener.lookupTransform("map", "odom", rospy.Time(0))
+            rospy.logdebug("Auto Explore: Transform map->odom available")
+            # Small delay to ensure transform is fully propagated
+            rospy.sleep(0.05)
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
+            rospy.logwarn("Auto Explore: Transform map->odom not available yet: %s. Waiting...", str(e))
+            # Wait a bit longer and try again
+            rospy.sleep(0.2)
+            try:
+                self.tf_listener.waitForTransform("map", "odom", rospy.Time(0), rospy.Duration(1.0))
+                rospy.sleep(0.05)  # Small delay after getting transform
+            except Exception as e2:
+                rospy.logwarn("Auto Explore: Still no transform after wait: %s. Proceeding anyway...", str(e2))
+        
+        # Create goal - use now() but ensure transform is available first
+        # The small delay above helps ensure transforms are synchronized
         goal = MoveBaseGoal()
         goal.target_pose.header.frame_id = "map"
         goal.target_pose.header.stamp = rospy.Time.now()
