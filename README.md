@@ -47,6 +47,8 @@ https://wiki.ros.org/cmd_vel_mux
 https://github.com/fazildgr8/ros_autonomous_slam
 https://www.youtube.com/watch?v=Zjb_2krr1Xg
 
+(Potentially) simulate pedestrians
+https://github.com/robotics-upo/gazebo_sfm_plugin
 
 ### Vincent quick start up
 

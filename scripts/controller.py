@@ -55,6 +55,8 @@ YOLO_ENABLE_TOPIC = '/darknet_ros/enable'
 MANUAL_OVERRIDE_TOPIC = '/manual_override'
 CMD_VEL_TOPIC = '/cmd_vel_mux/input/navi'
 TELEOP_TOPIC = '/cmd_vel_mux/input/teleop'
+RGB_IMAGE_TOPIC = '/camera/rgb/image_raw'
+DEPTH_IMAGE_TOPIC = '/camera/depth/image_raw'
 
 # Service names
 SERVICE_START_MAPPING = '/tour_guide/start_mapping'
