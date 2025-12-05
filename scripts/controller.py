@@ -18,7 +18,7 @@ import subprocess
 import os
 import signal
 from std_msgs.msg import String, Bool
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, PoseArray, Pose
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal, MoveBaseActionResult
 from actionlib_msgs.msg import GoalStatus, GoalStatusArray
 from std_srvs.srv import Empty, EmptyResponse, SetBool, SetBoolResponse
@@ -910,7 +910,8 @@ class TourGuideController:
         rospy.Subscriber(MANUAL_OVERRIDE_TOPIC, Bool, self._cb_manual_override)
         rospy.Subscriber(NAVIGATION_FEEDBACK_TOPIC, MoveBaseActionResult, self._cb_navigation_feedback)
         rospy.Subscriber('/move_base/status', GoalStatusArray, self._cb_move_base_status)
-        
+        rospy.Subscriber("/tour_guide/sorted_waypoints",  PoseArray, self._cb_sorted_waypoints)
+
         # ====================================================================
         # ROS SERVICES (for user commands)
         # ====================================================================
@@ -1051,7 +1052,22 @@ class TourGuideController:
                 rospy.loginfo_throttle(5, "Move base goal succeeded")
             elif status in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED]:
                 rospy.logwarn_throttle(5, "Move base goal failed with status %d", status)
-    
+    def _cb_sorted_waypoints(self, msg):
+        """
+        Receive sorted tour waypoints from D* and, if IDLE, start GUIDING.
+        """
+        self.guiding_waypoints = []
+        for p in msg.poses:
+            self.guiding_waypoints.append((p.position.x, p.position.y))
+
+        rospy.loginfo("Controller: received %d sorted tour waypoints",
+                      len(self.guiding_waypoints))
+
+        # If we're idle and have waypoints, start the tour
+        if self.state == RobotState.IDLE and self.guiding_waypoints:
+            rospy.loginfo("Controller: starting GUIDING from IDLE")
+            self.transition_to(RobotState.GUIDING)
+
     # ========================================================================
     # SERVICE HANDLERS (User Commands)
     # ========================================================================
@@ -1282,9 +1298,9 @@ class TourGuideController:
     
     def _handle_idle(self):
         """Handle IDLE state - robot waits for commands."""
-        # Robot is idle, waiting for user commands or state transitions
         rospy.loginfo_throttle(10, "IDLE: Waiting for commands...")
-        self.transition_to(RobotState.TEST_CIRCLE)
+        # DO NOT transition here – the waypoint callback will move us to GUIDING
+
     
     def _handle_mapping(self):
         """Handle MAPPING state - robot explores and builds map."""
@@ -1504,25 +1520,15 @@ class TourGuideController:
     # ========================================================================
     
     def _start_guiding_sequence(self):
-        """Initialize guiding sequence with waypoints."""
-        # Load waypoints from parameter or service
-        # For now, use a simple example
-        try:
-            waypoints_param = rospy.get_param('~guiding_waypoints', [])
-            if waypoints_param:
-                self.guiding_waypoints = waypoints_param
-            else:
-                rospy.logwarn("No waypoints configured for guiding")
-                self.guiding_waypoints = []
-        except:
-            self.guiding_waypoints = []
-        
+        """Initialize guiding sequence using waypoints from D*."""
+        if not self.guiding_waypoints:
+            rospy.logwarn("GUIDING requested but no waypoints; returning to IDLE")
+            self.transition_to(RobotState.IDLE)
+            return
+
         self.current_waypoint_index = 0
-        if self.guiding_waypoints:
-            self._navigate_to_next_waypoint()
-        else:
-            rospy.logwarn("No waypoints available, staying in GUIDING state")
-    
+        self._navigate_to_next_waypoint()
+
     def _navigate_to_next_waypoint(self):
         """Navigate to the next waypoint in the guiding sequence."""
         if self.current_waypoint_index >= len(self.guiding_waypoints):
