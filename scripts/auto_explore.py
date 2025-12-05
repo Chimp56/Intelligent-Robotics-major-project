@@ -186,7 +186,8 @@ class AutoExplore:
         origin_y = self.map_info.origin.position.y
         
         # Convert map data to numpy array for easier processing
-        map_array = np.array(self.map_data.data).reshape((height, width))
+        # self.map_data is already msg.data (the occupancy grid values)
+        map_array = np.array(self.map_data).reshape((height, width))
         
         # Count map statistics for debugging
         unknown_count = np.sum(map_array == UNKNOWN)
