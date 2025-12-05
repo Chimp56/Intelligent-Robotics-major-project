@@ -64,7 +64,7 @@ class AutoExplore:
         self.wander_direction = 1  # 1 for forward, 0 for turning
         self.wander_twist = None  # Current wander command
         
-        # Initial rotation state (2 full revolutions = 4π radians = 720 degrees)
+        # Initial rotation state (2 full revolutions = 4pi radians = 720 degrees)
         self.initial_rotation_complete = False
         self.initial_rotation_started = False
         self.initial_rotation_start_angle = None
@@ -574,7 +574,7 @@ class AutoExplore:
             if self.last_odom_yaw is not None:
                 # Calculate angle difference (handle wrap-around)
                 delta_yaw = current_yaw - self.last_odom_yaw
-                # Normalize to [-π, π]
+                # Normalize to [-pi, pi]
                 while delta_yaw > math.pi:
                     delta_yaw -= 2 * math.pi
                 while delta_yaw < -math.pi:
