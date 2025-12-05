@@ -903,7 +903,7 @@ class AutoExplore:
                 # For counter-clockwise rotation, handle wrap-around: if negative, it wrapped from +pi to -pi
                 if delta_yaw < 0:
                     # This is a wrap-around case (went from near +pi to near -pi)
-                    # The actual rotation is delta_yaw + 2π
+                    # The actual rotation is delta_yaw + 2pi
                     delta_yaw += 2 * math.pi
                 
                 # Accumulate rotation (should always be positive for counter-clockwise)
