@@ -19,11 +19,17 @@ class PositionLogger(object):
         self.odom_data = data
         if self.odom_data is None:
             return
-        self.pose_pub.publish(self.odom_data.pose.pose)
-        rospy.loginfo("PositionLogger: published pose: %s", self.odom_data.pose.pose)
-        rospy.loginfo("PositionLogger: odom data: %s", self.odom_data)
-        rospy.loginfo("PositionLogger: odom data: %s", self.odom_data.pose.pose.position)
-        rospy.loginfo("PositionLogger: odom data: %s", self.odom_data.pose.pose.orientation)
+        
+        # Create PoseStamped message with header and pose
+        pose_stamped = PoseStamped()
+        pose_stamped.header.stamp = rospy.Time.now()
+        pose_stamped.header.frame_id = self.odom_data.header.frame_id
+        pose_stamped.pose = self.odom_data.pose.pose
+        
+        self.pose_pub.publish(pose_stamped)
+        rospy.loginfo_throttle(5, "PositionLogger: published pose: (%.2f, %.2f)", 
+                               pose_stamped.pose.position.x, 
+                               pose_stamped.pose.position.y)
 
     def run(self):
         rospy.loginfo("PositionLogger: starting main loop.")
