@@ -64,6 +64,14 @@ class AutoExplore:
         self.wander_direction = 1  # 1 for forward, 0 for turning
         self.wander_twist = None  # Current wander command
         
+        # Initial rotation state (2 full revolutions = 4π radians = 720 degrees)
+        self.initial_rotation_complete = False
+        self.initial_rotation_started = False
+        self.initial_rotation_start_angle = None
+        self.initial_rotation_target = 4 * math.pi  # 2 full revolutions
+        self.initial_rotation_accumulated = 0.0
+        self.last_odom_yaw = None
+        
         # Now create publishers and subscribers (after all variables are initialized)
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
         self.state_pub = rospy.Publisher(STATE_TOPIC, String, queue_size=10, latch=True)
@@ -130,6 +138,11 @@ class AutoExplore:
         """
         Handle auto explore - main exploration logic
         """
+        # First, perform initial rotation if not complete
+        if not self.initial_rotation_complete:
+            self._perform_initial_rotation()
+            return
+        
         # Debug: Log current state
         rospy.loginfo_throttle(2, "Auto Explore: In MAPPING state, handling exploration...")
         
@@ -449,6 +462,30 @@ class AutoExplore:
         except Exception as e:
             rospy.logwarn("Auto Explore: Error checking goal status: %s", str(e))
 
+    def _perform_initial_rotation(self):
+        """
+        Perform 2 full revolutions (720 degrees) at the start of mapping
+        to capture the surrounding environment.
+        """
+        if not self.initial_rotation_started:
+            # Start the rotation
+            rospy.loginfo("Auto Explore: Starting initial 2-revolution scan to capture environment...")
+            self.initial_rotation_started = True
+            self.initial_rotation_accumulated = 0.0
+            # Get initial yaw from odometry if available
+            # (will be set in odom callback)
+        
+        # Rotate counter-clockwise at moderate speed
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.4  # 0.4 rad/s rotation speed
+        self.cmd_vel_pub.publish(twist)
+        
+        # Log progress
+        progress_pct = (self.initial_rotation_accumulated / self.initial_rotation_target) * 100
+        rospy.loginfo_throttle(2, "Auto Explore: Initial rotation progress: %.1f%% (%.1f° / 720°)", 
+                              progress_pct, math.degrees(self.initial_rotation_accumulated))
+
     def _wander_explore(self):
         """
         Simple wander behavior when map is mostly unknown.
@@ -504,10 +541,64 @@ class AutoExplore:
         rospy.loginfo_throttle(10, "Auto Explore: Received map update (%dx%d)", 
                               msg.info.width, msg.info.height)
 
+    def _quaternion_to_yaw(self, q):
+        """Convert quaternion to yaw angle in radians."""
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (q.w * q.x + q.y * q.z)
+        cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (q.w * q.y - q.z * q.x)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)
+        else:
+            pitch = math.asin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        return yaw
+
     def _cb_odom(self, msg):
         """
         Callback for odometry messages
         """
+        # Extract yaw from odometry for rotation tracking
+        current_yaw = self._quaternion_to_yaw(msg.pose.pose.orientation)
+        
+        # Track initial rotation progress
+        if self.state == RobotState.MAPPING and not self.initial_rotation_complete and self.initial_rotation_started:
+            if self.last_odom_yaw is not None:
+                # Calculate angle difference (handle wrap-around)
+                delta_yaw = current_yaw - self.last_odom_yaw
+                # Normalize to [-π, π]
+                while delta_yaw > math.pi:
+                    delta_yaw -= 2 * math.pi
+                while delta_yaw < -math.pi:
+                    delta_yaw += 2 * math.pi
+                # Accumulate rotation (always positive for counter-clockwise)
+                if delta_yaw < 0:
+                    delta_yaw += 2 * math.pi
+                self.initial_rotation_accumulated += delta_yaw
+                
+                # Check if rotation is complete
+                if self.initial_rotation_accumulated >= self.initial_rotation_target:
+                    self.initial_rotation_complete = True
+                    rospy.loginfo("Auto Explore: Initial rotation complete! (%.2f radians = %.1f degrees)", 
+                                 self.initial_rotation_accumulated, 
+                                 math.degrees(self.initial_rotation_accumulated))
+                    # Stop rotation
+                    twist = Twist()
+                    self.cmd_vel_pub.publish(twist)
+            # Initialize or update last yaw
+            if self.last_odom_yaw is None:
+                self.last_odom_yaw = current_yaw
+            else:
+                self.last_odom_yaw = current_yaw
+        
         # Try to get pose from tf first (more accurate in map frame)
         try:
             self.tf_listener.waitForTransform("map", "base_link", rospy.Time(0), rospy.Duration(0.1))
@@ -552,6 +643,17 @@ class AutoExplore:
                     self.cmd_vel_pub.publish(twist)
                     self.wander_mode = False
                     rospy.loginfo("Auto Explore: Stopped wander mode due to state change")
+                # Reset initial rotation state (will rotate again if mapping restarts)
+                if not self.initial_rotation_complete:
+                    self.initial_rotation_started = False
+                    self.initial_rotation_accumulated = 0.0
+                    self.last_odom_yaw = None
+            else:
+                # Entering MAPPING state - reset rotation if not complete
+                if not self.initial_rotation_complete:
+                    self.initial_rotation_started = False
+                    self.initial_rotation_accumulated = 0.0
+                    self.last_odom_yaw = None
         except ValueError as e:
             rospy.logwarn("Auto Explore: Unknown state: %s (error: %s)", msg.data, str(e))
         except AttributeError as e:
