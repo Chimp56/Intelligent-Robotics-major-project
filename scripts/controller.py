@@ -148,8 +148,8 @@ class Controller:
         # ====================================================================
         # ROS SERVICES (for user commands)
         # ====================================================================
-        # rospy.Service(SERVICE_START_MAPPING, Empty, self._srv_start_mapping)
-        # rospy.Service(SERVICE_STOP_MAPPING, Empty, self._srv_stop_mapping)
+        rospy.Service(SERVICE_START_MAPPING, Empty, self._srv_start_mapping)
+        rospy.Service(SERVICE_STOP_MAPPING, Empty, self._srv_stop_mapping)
         # rospy.Service(SERVICE_START_NAVIGATION, Empty, self._srv_start_navigation)
         # rospy.Service(SERVICE_START_GUIDING, Empty, self._srv_start_guiding)
         # rospy.Service(SERVICE_EMERGENCY_STOP, Empty, self._srv_emergency_stop)
@@ -288,40 +288,40 @@ class Controller:
     # SERVICE HANDLERS (User Commands)
     # ========================================================================
     
-    # def _srv_start_mapping(self, req):
-    #     """
-    #     Service handler to start mapping mode.
+    def _srv_start_mapping(self, req):
+        """
+        Service handler to start mapping mode.
         
-    #     Args:
-    #         req: Empty service request
+        Args:
+            req: Empty service request
             
-    #     Returns:
-    #         EmptyResponse
-    #     """
-    #     rospy.loginfo("Service call: start_mapping")
-    #     if self.state == RobotState.IDLE:
-    #         self.transition_to(RobotState.MAPPING)
-    #     else:
-    #         rospy.logwarn("Cannot start mapping from state: %s", self.state.value)
-    #     return EmptyResponse()
+        Returns:
+            EmptyResponse
+        """
+        rospy.loginfo("Service call: start_mapping")
+        if self.state == RobotState.IDLE or self.state == RobotState.MANUAL:
+            self.transition_to(RobotState.MAPPING)
+        else:
+            rospy.logwarn("Cannot start mapping from state: %s", self.state.value)
+        return EmptyResponse()
     
-    # def _srv_stop_mapping(self, req):
-    #     """
-    #     Service handler to stop mapping mode.
+    def _srv_stop_mapping(self, req):
+        """
+        Service handler to stop mapping mode.
         
-    #     Args:
-    #         req: Empty service request
+        Args:
+            req: Empty service request
             
-    #     Returns:
-    #         EmptyResponse
-    #     """
-    #     rospy.loginfo("Service call: stop_mapping")
-    #     if self.state == RobotState.MAPPING:
-    #         self._stop_gmapping()
-    #         self.transition_to(RobotState.IDLE)
-    #     else:
-    #         rospy.logwarn("Cannot stop mapping from state: %s", self.state.value)
-    #     return EmptyResponse()
+        Returns:
+            EmptyResponse
+        """
+        rospy.loginfo("Service call: stop_mapping")
+        if self.state == RobotState.MAPPING:
+            self._stop_gmapping()
+            self.transition_to(RobotState.IDLE)
+        else:
+            rospy.logwarn("Cannot stop mapping from state: %s", self.state.value)
+        return EmptyResponse()
     
     # def _srv_start_navigation(self, req):
     #     """

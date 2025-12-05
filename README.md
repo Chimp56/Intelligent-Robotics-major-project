@@ -37,6 +37,16 @@ To control turtlebot using keyboard (this will engage manual mode), open a new t
 roslaunch turtlebot_teleop keyboard_teleop.launch
 ```
 
+Start and stop mapping using commands
+
+```bash
+# Start mapping mode
+rosservice call /tour_guide/start_mapping
+
+# Stop mapping mode  
+rosservice call /tour_guide/stop_mapping
+```
+
 ## Help
 
 
