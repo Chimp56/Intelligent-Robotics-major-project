@@ -97,10 +97,13 @@ class AutoExplore:
         """
         Main run loop
         """
+        rospy.loginfo("Auto Explore: Starting main loop...")
         rate = rospy.Rate(EXPLORATION_RATE)
         while not rospy.is_shutdown():
             if self.state == RobotState.MAPPING:
                 self._handle_auto_explore()
+            else:
+                rospy.loginfo_throttle(10, "Auto Explore: Not in MAPPING state (current: %s), waiting...", self.state.value)
             rate.sleep()
 
     def _handle_auto_explore(self):
@@ -396,6 +399,9 @@ class AutoExplore:
         """
         Callback for map messages
         """
+        if self.map_data is None:
+            rospy.loginfo("Auto Explore: Received first map update (%dx%d, resolution: %.3f)", 
+                         msg.info.width, msg.info.height, msg.info.resolution)
         self.map_data = msg.data
         self.map_info = msg.info
         rospy.loginfo_throttle(10, "Auto Explore: Received map update (%dx%d)", 
@@ -409,10 +415,14 @@ class AutoExplore:
         try:
             self.tf_listener.waitForTransform("map", "base_link", rospy.Time(0), rospy.Duration(0.1))
             (trans, rot) = self.tf_listener.lookupTransform("map", "base_link", rospy.Time(0))
+            if self.robot_pose is None:
+                rospy.loginfo("Auto Explore: Got first robot pose from TF: (%.2f, %.2f)", trans[0], trans[1])
             self.robot_pose = (trans[0], trans[1])
         except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
             # Fall back to odometry
             pos = msg.pose.pose.position
+            if self.robot_pose is None:
+                rospy.loginfo("Auto Explore: Got first robot pose from odom: (%.2f, %.2f)", pos.x, pos.y)
             self.robot_pose = (pos.x, pos.y)
     
     def _cb_state(self, msg):
@@ -421,8 +431,10 @@ class AutoExplore:
         """
         try:
             old_state = self.state
-            self.state = RobotState(msg.data)
-            rospy.loginfo("Auto Explore: State changed from %s to %s", old_state.value, self.state.value)
+            new_state = RobotState(msg.data)
+            if old_state != new_state:
+                rospy.loginfo("Auto Explore: State changed from %s to %s", old_state.value, new_state.value)
+            self.state = new_state
             
             if self.state != RobotState.MAPPING:
                 # Cancel any active goals when leaving MAPPING state
@@ -435,3 +447,14 @@ class AutoExplore:
                     self.current_goal = None
         except ValueError as e:
             rospy.logwarn("Auto Explore: Unknown state: %s (error: %s)", msg.data, str(e))
+
+
+if __name__ == '__main__':
+    try:
+        auto_explore = AutoExplore()
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Auto Explore: Shutting down")
+    except Exception as e:
+        rospy.logerr("Auto Explore: Fatal error: %s", str(e))
+        import traceback
+        rospy.logerr(traceback.format_exc())
