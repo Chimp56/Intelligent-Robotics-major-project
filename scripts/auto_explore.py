@@ -116,8 +116,6 @@ class AutoExplore:
         try:
             if self.move_base_client is None:
                 self.move_base_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
-                # Register a safe feedback callback to prevent AttributeError
-                self.move_base_client.register_feedback_cb(self._move_base_feedback_cb)
             rospy.loginfo("Auto Explore: Waiting for move_base action server...")
             if self.move_base_client.wait_for_server(timeout=rospy.Duration(5.0)):
                 rospy.loginfo("Auto Explore: Connected to move_base action server")
@@ -132,12 +130,14 @@ class AutoExplore:
             import traceback
             rospy.logwarn(traceback.format_exc())
             self.move_base_client = None
+            return False
     
     def _move_base_feedback_cb(self, goal_handle, feedback):
         """Safe feedback callback for move_base to prevent AttributeError.
         
-        This callback is registered to prevent the AttributeError that occurs
-        when feedback arrives before the goal handle is fully initialized.
+        This callback is passed to send_goal() to handle feedback safely.
+        The callback prevents AttributeError when feedback arrives before
+        the goal handle is fully initialized.
         """
         # We don't need to process feedback, just having this callback prevents the error
         pass
@@ -720,7 +720,8 @@ class AutoExplore:
         # Send goal
         try:
             rospy.loginfo("Auto Explore: Sending goal to move_base at (%.2f, %.2f)", world_x, world_y)
-            self.move_base_client.send_goal(goal)
+            # Pass feedback callback to prevent AttributeError in actionlib
+            self.move_base_client.send_goal(goal, feedback_cb=self._move_base_feedback_cb)
             self.current_goal = goal
             self.goal_status = None
             self.goal_start_time = rospy.Time.now()  # Track when goal was sent
