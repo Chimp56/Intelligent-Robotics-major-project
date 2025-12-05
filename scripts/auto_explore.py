@@ -70,6 +70,8 @@ class AutoExplore:
         self.last_robot_position = None
         self.stuck_check_time = None
         self.stuck_distance_threshold = 0.1  # meters - if robot moves less than this, consider stuck
+        self.map_saved = False  # Track if map has been saved
+        self.last_no_frontier_time = None  # Track when we last had no frontiers
         
         # Exploration state
         self.exploring = False
@@ -236,9 +238,20 @@ class AutoExplore:
         rospy.loginfo("Auto Explore: Found %d frontier clusters", len(frontiers))
         
         if not frontiers:
-            rospy.logwarn("Auto Explore: No frontiers found. Using wander mode to explore more.")
+            rospy.logwarn("Auto Explore: No frontiers found. Exploration may be complete.")
+            # Track when we first detected no frontiers
+            if self.last_no_frontier_time is None:
+                self.last_no_frontier_time = rospy.Time.now()
+            # If no frontiers for 10 seconds, consider exploration complete and save map
+            elif (rospy.Time.now() - self.last_no_frontier_time).to_sec() > 10.0:
+                if not self.map_saved:
+                    rospy.loginfo("Auto Explore: No frontiers for 10 seconds, saving map...")
+                    self._save_map()
             self._wander_explore()
             return
+        else:
+            # Reset timer if frontiers found again
+            self.last_no_frontier_time = None
         
         # Select best frontier
         best_frontier = self._select_best_frontier(frontiers)
@@ -945,6 +958,59 @@ class AutoExplore:
         except AttributeError as e:
             # Handle case where callback is called before full initialization
             rospy.logwarn_throttle(1, "Auto Explore: State callback called before initialization complete: %s", str(e))
+
+    def _save_map(self, map_name=None):
+        """
+        Save the current map to a file.
+        
+        Args:
+            map_name: Optional name for the map (default: auto-generated with timestamp)
+        """
+        import subprocess
+        import os
+        from datetime import datetime
+        
+        if map_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            map_name = "explored_map_{}".format(timestamp)
+        
+        # Default to maps directory in package
+        package_path = os.path.join(os.path.expanduser('~'), 'catkin_ws/src/tour_guide')
+        save_dir = os.path.join(package_path, 'maps')
+        
+        # Create maps directory if it doesn't exist
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+            rospy.loginfo("Created maps directory: %s", save_dir)
+        
+        map_path = os.path.join(save_dir, map_name)
+        
+        rospy.loginfo("Auto Explore: Saving map to: %s", map_path)
+        
+        try:
+            # Use map_saver command
+            cmd = ['rosrun', 'map_server', 'map_saver', '-f', map_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                rospy.loginfo("Auto Explore: Map saved successfully!")
+                rospy.loginfo("  - %s.yaml", map_path)
+                rospy.loginfo("  - %s.pgm", map_path)
+                self.map_saved = True
+                return True
+            else:
+                rospy.logwarn("Auto Explore: Failed to save map: %s", result.stderr)
+                rospy.logwarn("Auto Explore: You can manually save the map using:")
+                rospy.logwarn("  rosrun map_server map_saver -f %s", map_path)
+                return False
+        except subprocess.TimeoutExpired:
+            rospy.logwarn("Auto Explore: Map save operation timed out")
+            return False
+        except Exception as e:
+            rospy.logwarn("Auto Explore: Error saving map: %s", str(e))
+            rospy.logwarn("Auto Explore: You can manually save the map using:")
+            rospy.logwarn("  rosrun map_server map_saver -f %s", map_path)
+            return False
 
 
 if __name__ == '__main__':
