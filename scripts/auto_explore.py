@@ -29,8 +29,9 @@ EXPLORATION_RATE = 2.0  # Hz - how often to check for new frontiers (increased f
 WANDER_FREE_THRESHOLD = 0.02  # Switch to frontier mode when 2% free (was 5%)
 
 # Obstacle avoidance constants
-MIN_OBSTACLE_DISTANCE = 0.2 # meters - minimum safe distance from obstacles
-FRONT_SCAN_ANGLE = math.radians(60)  # 60 degrees front cone to check for obstacles
+MIN_OBSTACLE_DISTANCE = 0.6 # meters - minimum safe distance from obstacles (increased for safety)
+FRONT_SCAN_ANGLE = math.radians(90)  # 90 degrees front cone to check for obstacles (wider for better detection)
+SAFE_STOPPING_DISTANCE = 0.8  # meters - distance at which to start slowing down
 OBSTACLE_CHECK_RATE = 10.0  # Hz - how often to check for obstacles
 
 class AutoExplore:
@@ -141,9 +142,30 @@ class AutoExplore:
         while not rospy.is_shutdown():
             if self.state == RobotState.MAPPING:
                 self._handle_auto_explore()
-                # In wander mode, publish commands more frequently for smooth movement
-                if self.wander_mode and self.wander_twist is not None:
-                    self.cmd_vel_pub.publish(self.wander_twist)
+                # In wander mode, check obstacles continuously and publish commands
+                if self.wander_mode:
+                    # Always check obstacles before publishing any command
+                    obstacle_dist = self._get_obstacle_distance_ahead()
+                    if obstacle_dist is not None and obstacle_dist < MIN_OBSTACLE_DISTANCE:
+                        # Emergency stop - obstacle too close
+                        rospy.logwarn_throttle(1, "Auto Explore: EMERGENCY STOP - obstacle at %.2f m!", obstacle_dist)
+                        emergency_twist = Twist()
+                        emergency_twist.linear.x = 0.0
+                        emergency_twist.angular.z = 0.0
+                        self.cmd_vel_pub.publish(emergency_twist)
+                        self.wander_twist = emergency_twist
+                    elif self.wander_twist is not None:
+                        # Adjust speed if approaching obstacle
+                        if obstacle_dist is not None and obstacle_dist < SAFE_STOPPING_DISTANCE and self.wander_direction == 1:
+                            # Slow down as approaching obstacle
+                            speed_factor = max(0.3, (obstacle_dist - MIN_OBSTACLE_DISTANCE) / (SAFE_STOPPING_DISTANCE - MIN_OBSTACLE_DISTANCE))
+                            adjusted_twist = Twist()
+                            adjusted_twist.linear.x = self.wander_twist.linear.x * speed_factor
+                            adjusted_twist.angular.z = self.wander_twist.angular.z
+                            self.cmd_vel_pub.publish(adjusted_twist)
+                        else:
+                            # Safe to publish normal command
+                            self.cmd_vel_pub.publish(self.wander_twist)
                 # During initial rotation, publish rotation command continuously
                 if not self.initial_rotation_complete and self.initial_rotation_started:
                     # Keep publishing rotation command
@@ -421,11 +443,24 @@ class AutoExplore:
             # Calculate distance from robot
             distance = math.sqrt((center_x - robot_x)**2 + (center_y - robot_y)**2)
             
+            # Skip if too close (move_base rejects goals too close)
+            if distance < 0.5:
+                continue
+            
+            # Check if frontier has known free space nearby (prefer these)
+            has_known_space = self._frontier_has_known_space(center_x, center_y)
+            
             # Score: information gain (cluster size) / distance
             # Prefer larger frontiers that are closer
-            # Optimized: weight distance more heavily for faster exploration
+            # Bonus for frontiers with known free space nearby (more likely to be accepted by move_base)
             info_gain = len(cluster)
-            score = info_gain / (distance * distance + 0.1)  # Square distance for stronger preference for closer frontiers
+            base_score = info_gain / (distance * distance + 0.1)  # Square distance for stronger preference for closer frontiers
+            
+            # Boost score if frontier has known free space nearby
+            if has_known_space:
+                base_score *= 1.5  # 50% bonus for known space
+            
+            score = base_score
             
             if score > best_score:
                 best_score = score
@@ -474,18 +509,26 @@ class AutoExplore:
             rospy.loginfo("Auto Explore: Cleared %d distant visited frontiers (more than %.1f m away)", 
                          cleared_count, distance_threshold)
 
-    def _is_goal_in_free_space(self, world_x, world_y):
+    def _is_goal_valid(self, world_x, world_y):
         """
-        Check if a goal location is in free space on the map.
+        Check if a goal location is valid for navigation.
+        Validates: free space, not too close, and has known space nearby.
         
         Args:
             world_x, world_y: World coordinates
         
         Returns:
-            True if goal is in free space, False otherwise
+            True if goal is valid, False otherwise
         """
         if self.map_data is None or self.map_info is None:
             return True  # Assume safe if no map data
+        
+        # Check minimum distance from robot (move_base rejects goals too close)
+        if self.robot_pose is not None:
+            distance = math.sqrt((world_x - self.robot_pose[0])**2 + (world_y - self.robot_pose[1])**2)
+            if distance < 0.5:  # Minimum 0.5m from robot
+                rospy.logwarn("Auto Explore: Goal too close to robot (%.2f m < 0.5 m)", distance)
+                return False
         
         # Convert world coordinates to grid coordinates
         resolution = self.map_info.resolution
@@ -500,18 +543,79 @@ class AutoExplore:
             rospy.logwarn("Auto Explore: Goal outside map bounds")
             return False
         
-        # Check if cell is free
+        # Check if cell is free (not occupied)
         map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
         cell_value = map_array[grid_y, grid_x]
         
-        # Check if cell is free or unknown (unknown is OK for frontiers)
-        if cell_value == FREE or cell_value == UNKNOWN or (0 < cell_value < FRONTIER_THRESHOLD):
-            return True
+        # Move_base rejects goals in occupied space
+        if cell_value >= FRONTIER_THRESHOLD:
+            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) is in occupied space (value: %d)", 
+                         world_x, world_y, cell_value)
+            return False
         
-        # Cell is occupied
-        rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) is in occupied space (value: %d)", 
-                     world_x, world_y, cell_value)
-        return False
+        # Check if goal has at least some known free space nearby (move_base needs known space for planning)
+        # Check 3x3 area around goal
+        known_free_nearby = False
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                nx, ny = grid_x + dx, grid_y + dy
+                if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                    neighbor_value = map_array[ny, nx]
+                    # If at least one neighbor is known free space, goal might be reachable
+                    if neighbor_value == FREE or (0 < neighbor_value < FRONTIER_THRESHOLD):
+                        known_free_nearby = True
+                        break
+            if known_free_nearby:
+                break
+        
+        if not known_free_nearby:
+            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has no known free space nearby (all unknown/occupied)", 
+                         world_x, world_y)
+            return False
+        
+        return True
+
+    def _frontier_has_known_space(self, world_x, world_y):
+        """
+        Check if a frontier location has known free space nearby.
+        This helps ensure move_base can plan a path.
+        
+        Args:
+            world_x, world_y: World coordinates
+        
+        Returns:
+            True if frontier has known free space nearby, False otherwise
+        """
+        if self.map_data is None or self.map_info is None:
+            return True  # Assume OK if no map data
+        
+        # Convert world coordinates to grid coordinates
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        # Check bounds
+        if grid_x < 0 or grid_x >= self.map_info.width or grid_y < 0 or grid_y >= self.map_info.height:
+            return False
+        
+        # Check 5x5 area around frontier for known free space
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        known_count = 0
+        
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                nx, ny = grid_x + dx, grid_y + dy
+                if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                    cell_value = map_array[ny, nx]
+                    # Count known free space
+                    if cell_value == FREE or (0 < cell_value < FRONTIER_THRESHOLD):
+                        known_count += 1
+        
+        # Need at least 5 known free cells nearby
+        return known_count >= 5
 
     def _navigate_to_frontier(self, frontier):
         """
@@ -531,9 +635,9 @@ class AutoExplore:
         
         world_x, world_y = frontier
         
-        # Validate goal is in free space
-        if not self._is_goal_in_free_space(world_x, world_y):
-            rospy.logwarn("Auto Explore: Skipping frontier at (%.2f, %.2f) - not in free space", world_x, world_y)
+        # Validate goal is valid for navigation
+        if not self._is_goal_valid(world_x, world_y):
+            rospy.logwarn("Auto Explore: Skipping frontier at (%.2f, %.2f) - invalid for navigation", world_x, world_y)
             # Mark as visited to avoid retrying (use same precision as selection)
             frontier_key = (int(world_x * 2), int(world_y * 2))
             self.visited_frontiers.add(frontier_key)
@@ -610,6 +714,13 @@ class AutoExplore:
                 return True
             elif state in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
                 rospy.logwarn("Auto Explore: Goal failed with status %d (%s)", state, status_name)
+                # Mark rejected/aborted goals as visited to avoid retrying
+                if self.current_goal is not None:
+                    goal_x = self.current_goal.target_pose.pose.position.x
+                    goal_y = self.current_goal.target_pose.pose.position.y
+                    frontier_key = (int(goal_x * 2), int(goal_y * 2))
+                    self.visited_frontiers.add(frontier_key)
+                    rospy.logwarn("Auto Explore: Marked rejected frontier at (%.2f, %.2f) as visited", goal_x, goal_y)
                 self._cancel_current_goal()
                 return True
             else:
@@ -759,27 +870,62 @@ class AutoExplore:
         
         # Check if obstacle is too close
         if min_distance < MIN_OBSTACLE_DISTANCE:
-            rospy.logwarn_throttle(1, "Auto Explore: Obstacle detected ahead! Distance: %.2f m", min_distance)
+            rospy.logwarn_throttle(1, "Auto Explore: Obstacle detected ahead! Distance: %.2f m (threshold: %.2f m)", 
+                                 min_distance, MIN_OBSTACLE_DISTANCE)
             return True
         
         return False
+    
+    def _get_obstacle_distance_ahead(self):
+        """
+        Get the minimum distance to an obstacle ahead.
+        Returns the distance in meters, or None if no obstacle detected.
+        """
+        if self.laser_data is None:
+            return None
+        
+        ranges = self.laser_data.ranges
+        if not ranges:
+            return None
+        
+        angle_min = self.laser_data.angle_min
+        angle_increment = self.laser_data.angle_increment
+        
+        # Check front cone (FRONT_SCAN_ANGLE degrees on each side)
+        front_indices = []
+        for i, angle in enumerate([angle_min + j * angle_increment for j in range(len(ranges))]):
+            if abs(angle) <= FRONT_SCAN_ANGLE / 2:
+                front_indices.append(i)
+        
+        if not front_indices:
+            return None
+        
+        # Get minimum distance in front cone
+        front_ranges = [ranges[i] for i in front_indices if ranges[i] > 0 and not math.isnan(ranges[i])]
+        
+        if not front_ranges:
+            return None
+        
+        return min(front_ranges)
 
     def _wander_explore(self):
         """
         Simple wander behavior when map is mostly unknown.
         Moves forward and turns periodically to explore.
         Optimized for faster exploration with continuous movement.
-        Includes obstacle avoidance.
+        Includes aggressive obstacle avoidance.
         """
-        # Check for obstacles before moving forward
-        if self._check_obstacle_ahead():
-            # Obstacle detected - stop and turn away
-            rospy.logwarn("Auto Explore: Obstacle ahead, turning away...")
+        # ALWAYS check for obstacles first - this is critical for safety
+        obstacle_dist = self._get_obstacle_distance_ahead()
+        
+        if obstacle_dist is not None and obstacle_dist < MIN_OBSTACLE_DISTANCE:
+            # Obstacle too close - stop immediately and turn away
+            rospy.logwarn("Auto Explore: Obstacle too close (%.2f m), stopping and turning away...", obstacle_dist)
             twist = Twist()
             twist.linear.x = 0.0
             # Turn in random direction away from obstacle
             turn_dir = random.choice([-1, 1])
-            twist.angular.z = 0.5 * turn_dir
+            twist.angular.z = 0.6 * turn_dir  # Faster turn to get away
             self.wander_twist = twist
             self.cmd_vel_pub.publish(twist)
             self.wander_direction = 0  # Stay in turning mode
@@ -789,13 +935,29 @@ class AutoExplore:
         now = rospy.Time.now()
         elapsed = (now - self.last_wander_action).to_sec()
         
-        # Keep publishing the current command to maintain continuous movement
+        # If we have a current command and it's been less than 2 seconds, continue it
+        # BUT always check for obstacles first
         if self.wander_twist is not None and elapsed < 2.0:
-            # Only continue forward movement if no obstacle
+            # If moving forward, check obstacle distance and adjust speed
             if self.wander_direction == 1:
-                if not self._check_obstacle_ahead():
+                if obstacle_dist is not None:
+                    if obstacle_dist < SAFE_STOPPING_DISTANCE:
+                        # Slow down as we approach obstacle
+                        speed_factor = max(0.3, (obstacle_dist - MIN_OBSTACLE_DISTANCE) / (SAFE_STOPPING_DISTANCE - MIN_OBSTACLE_DISTANCE))
+                        twist = Twist()
+                        twist.linear.x = 0.2 * speed_factor  # Reduce speed based on distance
+                        twist.angular.z = self.wander_twist.angular.z
+                        self.wander_twist = twist
+                        self.cmd_vel_pub.publish(twist)
+                        rospy.loginfo_throttle(2, "Auto Explore: Slowing down - obstacle at %.2f m", obstacle_dist)
+                    else:
+                        # Safe distance, continue at normal speed
+                        self.cmd_vel_pub.publish(self.wander_twist)
+                else:
+                    # No obstacle data, proceed cautiously
                     self.cmd_vel_pub.publish(self.wander_twist)
             else:
+                # Turning, safe to continue
                 self.cmd_vel_pub.publish(self.wander_twist)
             return
         
@@ -808,20 +970,25 @@ class AutoExplore:
         # Pattern: move forward, then turn, repeat
         if self.wander_direction == 1:
             # Check for obstacles one more time before moving forward
-            if self._check_obstacle_ahead():
+            if obstacle_dist is not None and obstacle_dist < MIN_OBSTACLE_DISTANCE:
                 # Obstacle detected, turn instead
                 turn_dir = random.choice([-1, 1])
                 twist = Twist()
                 twist.linear.x = 0.0
-                twist.angular.z = 0.5 * turn_dir
+                twist.angular.z = 0.6 * turn_dir
                 self.wander_twist = twist
                 self.cmd_vel_pub.publish(twist)
                 self.wander_direction = 0
                 rospy.loginfo("Auto Explore: Wander mode - obstacle detected, turning")
             else:
-                # Move forward at higher speed with slight random turn for better coverage
+                # Move forward at moderate speed with slight random turn for better coverage
                 twist = Twist()
-                twist.linear.x = 0.25  # Reduced from 0.3 for safety with obstacle avoidance
+                # Adjust speed based on obstacle distance
+                if obstacle_dist is not None and obstacle_dist < SAFE_STOPPING_DISTANCE:
+                    speed_factor = max(0.3, (obstacle_dist - MIN_OBSTACLE_DISTANCE) / (SAFE_STOPPING_DISTANCE - MIN_OBSTACLE_DISTANCE))
+                    twist.linear.x = 0.2 * speed_factor
+                else:
+                    twist.linear.x = 0.2  # Moderate speed for safety
                 twist.angular.z = random.uniform(-0.1, 0.1)  # Slight random turn while moving
                 self.wander_twist = twist
                 self.cmd_vel_pub.publish(twist)
