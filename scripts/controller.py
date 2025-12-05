@@ -20,7 +20,7 @@ import signal
 from std_msgs.msg import String, Bool
 from geometry_msgs.msg import PoseStamped, Twist
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal, MoveBaseActionResult
-from actionlib_msgs.msg import GoalStatus
+from actionlib_msgs.msg import GoalStatus, GoalStatusArray
 from std_srvs.srv import Empty, EmptyResponse, SetBool, SetBoolResponse
 import actionlib
 from enum import Enum
@@ -140,7 +140,7 @@ class Controller:
         rospy.Subscriber(MAPPING_DONE_TOPIC, Bool, self._cb_mapping_done)
         rospy.Subscriber(MANUAL_OVERRIDE_TOPIC, Bool, self._cb_manual_override)
         rospy.Subscriber(NAVIGATION_FEEDBACK_TOPIC, MoveBaseActionResult, self._cb_navigation_feedback)
-        rospy.Subscriber('/move_base/status', GoalStatus, self._cb_move_base_status)
+        rospy.Subscriber('/move_base/status', GoalStatusArray, self._cb_move_base_status)
         
         # ====================================================================
         # ROS SERVICES (for user commands)
@@ -262,10 +262,15 @@ class Controller:
         Callback for move_base status updates.
         
         Args:
-            msg: actionlib_msgs/GoalStatus
+            msg: actionlib_msgs/GoalStatusArray
         """
-        # Additional status monitoring can be added here
-        pass
+        # GoalStatusArray contains a list of statuses, check the first one if available
+        if msg.status_list:
+            status = msg.status_list[0].status
+            if status == GoalStatus.SUCCEEDED:
+                rospy.loginfo_throttle(5, "Move base goal succeeded")
+            elif status in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED]:
+                rospy.logwarn_throttle(5, "Move base goal failed with status %d", status)
     
     # ========================================================================
     # SERVICE HANDLERS (User Commands)
@@ -885,7 +890,7 @@ class TourGuideController:
         rospy.Subscriber(TELEOP_OVERRIDE_TOPIC, Bool, self._cb_teleop_override)
         rospy.Subscriber(MANUAL_OVERRIDE_TOPIC, Bool, self._cb_manual_override)
         rospy.Subscriber(NAVIGATION_FEEDBACK_TOPIC, MoveBaseActionResult, self._cb_navigation_feedback)
-        rospy.Subscriber('/move_base/status', GoalStatus, self._cb_move_base_status)
+        rospy.Subscriber('/move_base/status', GoalStatusArray, self._cb_move_base_status)
         
         # ====================================================================
         # ROS SERVICES (for user commands)
@@ -1018,10 +1023,15 @@ class TourGuideController:
         Callback for move_base status updates.
         
         Args:
-            msg: actionlib_msgs/GoalStatus
+            msg: actionlib_msgs/GoalStatusArray
         """
-        # Additional status monitoring can be added here
-        pass
+        # GoalStatusArray contains a list of statuses, check the first one if available
+        if msg.status_list:
+            status = msg.status_list[0].status
+            if status == GoalStatus.SUCCEEDED:
+                rospy.loginfo_throttle(5, "Move base goal succeeded")
+            elif status in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED]:
+                rospy.logwarn_throttle(5, "Move base goal failed with status %d", status)
     
     # ========================================================================
     # SERVICE HANDLERS (User Commands)
