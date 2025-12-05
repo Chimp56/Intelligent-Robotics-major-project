@@ -30,7 +30,7 @@ WANDER_FREE_THRESHOLD = 0.02  # Switch to frontier mode when 2% free (was 5%)
 
 # Obstacle avoidance constants
 MIN_OBSTACLE_DISTANCE = 0.6 # meters - minimum safe distance from obstacles (increased for safety)
-FRONT_SCAN_ANGLE = math.radians(90)  # 90 degrees front cone to check for obstacles (wider for better detection)
+FRONT_SCAN_ANGLE = math.radians(30)  # 90 degrees front cone to check for obstacles (wider for better detection)
 SAFE_STOPPING_DISTANCE = 0.8  # meters - distance at which to start slowing down
 OBSTACLE_CHECK_RATE = 10.0  # Hz - how often to check for obstacles
 
