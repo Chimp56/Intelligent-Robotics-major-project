@@ -12,6 +12,7 @@ import tf
 from collections import deque
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from actionlib_msgs.msg import GoalStatus
@@ -26,6 +27,11 @@ FRONTIER_THRESHOLD = 50  # Occupancy value threshold
 MIN_FRONTIER_SIZE = 10  # Minimum number of cells in a frontier cluster (reduced for faster exploration)
 EXPLORATION_RATE = 2.0  # Hz - how often to check for new frontiers (increased for faster response)
 WANDER_FREE_THRESHOLD = 0.02  # Switch to frontier mode when 2% free (was 5%)
+
+# Obstacle avoidance constants
+MIN_OBSTACLE_DISTANCE = 0.2 # meters - minimum safe distance from obstacles
+FRONT_SCAN_ANGLE = math.radians(60)  # 60 degrees front cone to check for obstacles
+OBSTACLE_CHECK_RATE = 10.0  # Hz - how often to check for obstacles
 
 class AutoExplore:
     """
@@ -49,6 +55,11 @@ class AutoExplore:
         self.map_info = None
         self.robot_pose = None
         self.tf_listener = tf.TransformListener()
+        
+        # Laser scan data for obstacle avoidance
+        self.laser_data = None
+        self.last_obstacle_check = rospy.Time.now()
+        self.obstacle_detected = False
         
         # Move base action client for navigation
         self.move_base_client = None
@@ -80,6 +91,7 @@ class AutoExplore:
         # Subscribers
         self.map_sub = rospy.Subscriber('/map', OccupancyGrid, self._cb_map)
         self.odom_sub = rospy.Subscriber('/odom', Odometry, self._cb_odom)
+        self.laser_sub = rospy.Subscriber('/scan', LaserScan, self._cb_laser)
         
         # Initialize move_base client
         self._init_move_base_client()
@@ -380,6 +392,45 @@ class AutoExplore:
         
         return best_frontier
 
+    def _is_goal_in_free_space(self, world_x, world_y):
+        """
+        Check if a goal location is in free space on the map.
+        
+        Args:
+            world_x, world_y: World coordinates
+        
+        Returns:
+            True if goal is in free space, False otherwise
+        """
+        if self.map_data is None or self.map_info is None:
+            return True  # Assume safe if no map data
+        
+        # Convert world coordinates to grid coordinates
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        # Check bounds
+        if grid_x < 0 or grid_x >= self.map_info.width or grid_y < 0 or grid_y >= self.map_info.height:
+            rospy.logwarn("Auto Explore: Goal outside map bounds")
+            return False
+        
+        # Check if cell is free
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        cell_value = map_array[grid_y, grid_x]
+        
+        # Check if cell is free or unknown (unknown is OK for frontiers)
+        if cell_value == FREE or cell_value == UNKNOWN or (0 < cell_value < FRONTIER_THRESHOLD):
+            return True
+        
+        # Cell is occupied
+        rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) is in occupied space (value: %d)", 
+                     world_x, world_y, cell_value)
+        return False
+
     def _navigate_to_frontier(self, frontier):
         """
         Navigate to a frontier using move_base
@@ -397,6 +448,14 @@ class AutoExplore:
             return
         
         world_x, world_y = frontier
+        
+        # Validate goal is in free space
+        if not self._is_goal_in_free_space(world_x, world_y):
+            rospy.logwarn("Auto Explore: Skipping frontier at (%.2f, %.2f) - not in free space", world_x, world_y)
+            # Mark as visited anyway to avoid retrying
+            frontier_key = (int(world_x * 10), int(world_y * 10))
+            self.visited_frontiers.add(frontier_key)
+            return
         
         # Create goal
         goal = MoveBaseGoal()
@@ -466,6 +525,7 @@ class AutoExplore:
         """
         Perform 2 full revolutions (720 degrees) at the start of mapping
         to capture the surrounding environment.
+        Includes safety check for obstacles.
         """
         if not self.initial_rotation_started:
             # Start the rotation
@@ -474,6 +534,18 @@ class AutoExplore:
             self.initial_rotation_accumulated = 0.0
             # Get initial yaw from odometry if available
             # (will be set in odom callback)
+        
+        # Safety check: if obstacle is very close, stop rotation temporarily
+        if self.laser_data is not None:
+            ranges = self.laser_data.ranges
+            if ranges:
+                min_range = min([r for r in ranges if r > 0 and not math.isnan(r)])
+                if min_range < MIN_OBSTACLE_DISTANCE * 0.5:  # Very close obstacle
+                    rospy.logwarn("Auto Explore: Obstacle very close during rotation, pausing...")
+                    twist = Twist()  # Stop
+                    self.cmd_vel_pub.publish(twist)
+                    rospy.sleep(0.5)
+                    return
         
         # Rotate counter-clockwise at moderate speed
         twist = Twist()
@@ -486,18 +558,78 @@ class AutoExplore:
         rospy.loginfo_throttle(2, "Auto Explore: Initial rotation progress: %.1f%% (%.1f degrees / 720 degrees)", 
                               progress_pct, math.degrees(self.initial_rotation_accumulated))
 
+    def _check_obstacle_ahead(self):
+        """
+        Check if there's an obstacle ahead using laser scan data.
+        Returns True if obstacle detected, False otherwise.
+        """
+        if self.laser_data is None:
+            return False
+        
+        ranges = self.laser_data.ranges
+        if not ranges:
+            return False
+        
+        angle_min = self.laser_data.angle_min
+        angle_increment = self.laser_data.angle_increment
+        
+        # Check front cone (FRONT_SCAN_ANGLE degrees on each side)
+        front_indices = []
+        for i, angle in enumerate([angle_min + j * angle_increment for j in range(len(ranges))]):
+            if abs(angle) <= FRONT_SCAN_ANGLE / 2:
+                front_indices.append(i)
+        
+        if not front_indices:
+            return False
+        
+        # Get minimum distance in front cone
+        front_ranges = [ranges[i] for i in front_indices if ranges[i] > 0 and not math.isnan(ranges[i])]
+        
+        if not front_ranges:
+            return False
+        
+        min_distance = min(front_ranges)
+        
+        # Check if obstacle is too close
+        if min_distance < MIN_OBSTACLE_DISTANCE:
+            rospy.logwarn_throttle(1, "Auto Explore: Obstacle detected ahead! Distance: %.2f m", min_distance)
+            return True
+        
+        return False
+
     def _wander_explore(self):
         """
         Simple wander behavior when map is mostly unknown.
         Moves forward and turns periodically to explore.
         Optimized for faster exploration with continuous movement.
+        Includes obstacle avoidance.
         """
+        # Check for obstacles before moving forward
+        if self._check_obstacle_ahead():
+            # Obstacle detected - stop and turn away
+            rospy.logwarn("Auto Explore: Obstacle ahead, turning away...")
+            twist = Twist()
+            twist.linear.x = 0.0
+            # Turn in random direction away from obstacle
+            turn_dir = random.choice([-1, 1])
+            twist.angular.z = 0.5 * turn_dir
+            self.wander_twist = twist
+            self.cmd_vel_pub.publish(twist)
+            self.wander_direction = 0  # Stay in turning mode
+            self.last_wander_action = rospy.Time.now()
+            return
+        
         now = rospy.Time.now()
         elapsed = (now - self.last_wander_action).to_sec()
         
         # Keep publishing the current command to maintain continuous movement
         if self.wander_twist is not None and elapsed < 2.0:
-            self.cmd_vel_pub.publish(self.wander_twist)
+            # Only continue forward movement if no obstacle
+            if self.wander_direction == 1:
+                if not self._check_obstacle_ahead():
+                    self.cmd_vel_pub.publish(self.wander_twist)
+            else:
+                self.cmd_vel_pub.publish(self.wander_twist)
             return
         
         # Change behavior more frequently for faster exploration (1-2 seconds)
@@ -508,15 +640,27 @@ class AutoExplore:
         
         # Pattern: move forward, then turn, repeat
         if self.wander_direction == 1:
-            # Move forward at higher speed with slight random turn for better coverage
-            twist = Twist()
-            twist.linear.x = 0.3  # 0.3 m/s forward (increased for speed)
-            twist.angular.z = random.uniform(-0.1, 0.1)  # Slight random turn while moving
-            self.wander_twist = twist
-            self.cmd_vel_pub.publish(twist)
-            rospy.loginfo("Auto Explore: Wander mode - moving forward")
-            # After moving forward, turn
-            self.wander_direction = 0
+            # Check for obstacles one more time before moving forward
+            if self._check_obstacle_ahead():
+                # Obstacle detected, turn instead
+                turn_dir = random.choice([-1, 1])
+                twist = Twist()
+                twist.linear.x = 0.0
+                twist.angular.z = 0.5 * turn_dir
+                self.wander_twist = twist
+                self.cmd_vel_pub.publish(twist)
+                self.wander_direction = 0
+                rospy.loginfo("Auto Explore: Wander mode - obstacle detected, turning")
+            else:
+                # Move forward at higher speed with slight random turn for better coverage
+                twist = Twist()
+                twist.linear.x = 0.25  # Reduced from 0.3 for safety with obstacle avoidance
+                twist.angular.z = random.uniform(-0.1, 0.1)  # Slight random turn while moving
+                self.wander_twist = twist
+                self.cmd_vel_pub.publish(twist)
+                rospy.loginfo("Auto Explore: Wander mode - moving forward")
+                # After moving forward, turn
+                self.wander_direction = 0
         elif self.wander_direction == 0:
             # Turn in place (random direction) at higher speed
             turn_dir = random.choice([-1, 1])
@@ -540,6 +684,12 @@ class AutoExplore:
         self.map_info = msg.info
         rospy.loginfo_throttle(10, "Auto Explore: Received map update (%dx%d)", 
                               msg.info.width, msg.info.height)
+
+    def _cb_laser(self, msg):
+        """
+        Callback for laser scan messages
+        """
+        self.laser_data = msg
 
     def _quaternion_to_yaw(self, q):
         """Convert quaternion to yaw angle in radians."""
