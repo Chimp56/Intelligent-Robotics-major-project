@@ -33,7 +33,7 @@ from enum import Enum
 class RobotState(Enum):
     """Enumeration of all possible robot states."""
     IDLE = "IDLE" # Robot is idle, waiting for commands.
-    MAPPING = "MAPPING" # Robot is mapping the environment.
+    MAPPING = "MAPPING" # Robot is actively mapping the environment through autonomous exploration.
     NAVIGATING = "NAVIGATING" # Robot is navigating to a goal.
     GUIDING = "GUIDING" # Robot is guiding a user to a sequence of goals.
     MANUAL = "MANUAL" # Robot is in manual mode (teleop).
@@ -53,6 +53,7 @@ NAVIGATION_FEEDBACK_TOPIC = '/move_base/result'
 TELEOP_OVERRIDE_TOPIC = '/tour_guide/teleop_override'
 YOLO_ENABLE_TOPIC = '/darknet_ros/enable'
 MANUAL_OVERRIDE_TOPIC = '/manual_override'
+CMD_VEL_TOPIC = '/cmd_vel_mux/input/navi'
 
 # Service names
 SERVICE_START_MAPPING = '/tour_guide/start_mapping'
@@ -425,7 +426,7 @@ class Controller:
     def _enter_state(self, state):
         """Perform entry actions when entering a state."""
         if state == RobotState.MAPPING:
-            self._start_gmapping()
+            pass
         elif state == RobotState.NAVIGATING:
             self.navigation_error = False
             self.goal_reached = False
@@ -502,7 +503,7 @@ class Controller:
         """Handle IDLE state - robot waits for commands."""
         # Robot is idle, waiting for user commands or state transitions
         rospy.loginfo_throttle(10, "IDLE: Waiting for commands...")
-        self.transition_to(RobotState.TEST_CIRCLE)
+        self.transition_to(RobotState.MAPPING)
     
     def _handle_mapping(self):
         """Handle MAPPING state - robot explores and builds map."""

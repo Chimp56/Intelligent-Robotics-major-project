@@ -9,9 +9,10 @@ Act as a tour guide
 
 ## Requirements
 - Python2
-- Ros melodic
+- Ros1 melodic
 - Gazebo
 - Rviz
+- TurtleBot2
 
 ## Instructions
 

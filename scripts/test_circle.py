@@ -12,10 +12,7 @@ Publishes:
 import rospy
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
-from controller import RobotState, STATE_TOPIC
-
-# Topic for velocity commands
-CMD_VEL_TOPIC = '/cmd_vel_mux/input/navi'
+from controller import RobotState, STATE_TOPIC, CMD_VEL_TOPIC
 
 class CircleTestNode:
     """Simple node that makes the robot move in a circle."""

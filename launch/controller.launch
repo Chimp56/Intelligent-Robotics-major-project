@@ -54,7 +54,8 @@
   <node pkg="tour_guide" type="controller.py" name="controller" output="screen">
   </node>
   <node pkg="tour_guide" type="test_circle.py" name="test_circle" output="screen">
-
+  </node>
+  <node pkg="tour_guide" type="auto_explore.py" name="auto_explore" output="screen">
   </node>
 
 
