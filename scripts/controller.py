@@ -54,6 +54,7 @@ TELEOP_OVERRIDE_TOPIC = '/tour_guide/teleop_override'
 YOLO_ENABLE_TOPIC = '/darknet_ros/enable'
 MANUAL_OVERRIDE_TOPIC = '/manual_override'
 CMD_VEL_TOPIC = '/cmd_vel_mux/input/navi'
+TELEOP_TOPIC = '/cmd_vel_mux/input/teleop'
 
 # Service names
 SERVICE_START_MAPPING = '/tour_guide/start_mapping'
@@ -141,7 +142,7 @@ class Controller:
         rospy.Subscriber(MANUAL_OVERRIDE_TOPIC, Bool, self._cb_manual_override)
         rospy.Subscriber(NAVIGATION_FEEDBACK_TOPIC, MoveBaseActionResult, self._cb_navigation_feedback)
         rospy.Subscriber('/move_base/status', GoalStatusArray, self._cb_move_base_status)
-        
+        rospy.Subscriber(TELEOP_TOPIC, Twist, self._cb_teleop)
         # ====================================================================
         # ROS SERVICES (for user commands)
         # ====================================================================
@@ -184,6 +185,15 @@ class Controller:
     # CALLBACK FUNCTIONS
     # ========================================================================
     
+    def _cb_teleop(self, msg):
+        """
+        Callback for teleop commands.
+        
+        Args:
+            msg: geometry_msgs/Twist - teleop commands
+        """
+        self.transition_to(RobotState.MANUAL)
+
     def _cb_mapping_done(self, msg):
         """
         Callback for mapping completion signal.
@@ -439,6 +449,7 @@ class Controller:
             self._enable_yolo()
             self._start_guiding_sequence()
         elif state == RobotState.MANUAL:
+            pass
             self._cancel_navigation_goals()
             self._disable_yolo()
         elif state == RobotState.STOP:

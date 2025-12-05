@@ -25,21 +25,20 @@ catkin_make
 source devel/setup.bash
 ```
 
+save map
+
 ```bash
-cd ~/catkin_ws/src/tour_guide/scripts
-sed -i 's/\r$//' *.py
-chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
+rosrun map_server map_saver -f ~/catkin_ws/src/tour_guide/maps/my_map
 ```
-## Help
 
+To control turtlebot using keyboard (this will engage manual mode), open a new terminal and run:
 
-
-### keyboard movement
-
-To control turtlebot using keyboard, open a new terminal and run:
 ```bash
 roslaunch turtlebot_teleop keyboard_teleop.launch
 ```
+
+## Help
+
 
 https://wiki.ros.org/cmd_vel_mux
 
