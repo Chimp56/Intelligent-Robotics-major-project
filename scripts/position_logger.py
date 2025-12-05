@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # logs the position of the robot in the world frame
 
 import rospy
