@@ -23,8 +23,9 @@ UNKNOWN = -1
 FREE = 0
 OCCUPIED = 100
 FRONTIER_THRESHOLD = 50  # Occupancy value threshold
-MIN_FRONTIER_SIZE = 20  # Minimum number of cells in a frontier cluster
-EXPLORATION_RATE = 1.0  # Hz - how often to check for new frontiers
+MIN_FRONTIER_SIZE = 10  # Minimum number of cells in a frontier cluster (reduced for faster exploration)
+EXPLORATION_RATE = 2.0  # Hz - how often to check for new frontiers (increased for faster response)
+WANDER_FREE_THRESHOLD = 0.02  # Switch to frontier mode when 2% free (was 5%)
 
 class AutoExplore:
     """
@@ -60,7 +61,8 @@ class AutoExplore:
         self.visited_frontiers = set()
         self.wander_mode = True  # Start in wander mode until map has free space
         self.last_wander_action = rospy.Time.now()
-        self.wander_direction = 1  # 1 for forward, -1 for backward
+        self.wander_direction = 1  # 1 for forward, 0 for turning
+        self.wander_twist = None  # Current wander command
         
         # Now create publishers and subscribers (after all variables are initialized)
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
@@ -107,12 +109,21 @@ class AutoExplore:
         Main run loop
         """
         rospy.loginfo("Auto Explore: Starting main loop...")
-        rate = rospy.Rate(EXPLORATION_RATE)
+        # Use higher rate for more responsive control, especially in wander mode
+        rate = rospy.Rate(max(EXPLORATION_RATE * 2, 5.0))  # At least 5 Hz for smooth control
         while not rospy.is_shutdown():
             if self.state == RobotState.MAPPING:
                 self._handle_auto_explore()
+                # In wander mode, publish commands more frequently for smooth movement
+                if self.wander_mode and self.wander_twist is not None:
+                    self.cmd_vel_pub.publish(self.wander_twist)
             else:
                 rospy.loginfo_throttle(10, "Auto Explore: Not in MAPPING state (current: %s), waiting...", self.state.value)
+                # Stop any wander movement when not in MAPPING
+                if self.wander_twist is not None:
+                    twist = Twist()
+                    self.cmd_vel_pub.publish(twist)
+                    self.wander_twist = None
             rate.sleep()
 
     def _handle_auto_explore(self):
@@ -165,8 +176,8 @@ class AutoExplore:
         unknown_count = np.sum(map_array == UNKNOWN)
         total_cells = self.map_info.width * self.map_info.height
         
-        # If map is mostly unknown (less than 5% free), use simple wander behavior
-        if free_count < total_cells * 0.05:
+        # If map is mostly unknown (less than threshold), use simple wander behavior
+        if free_count < total_cells * WANDER_FREE_THRESHOLD:
             if not self.wander_mode:
                 rospy.loginfo("Auto Explore: Map mostly unknown (%.1f%% free), switching to wander mode", 
                              (free_count / float(total_cells)) * 100)
@@ -346,8 +357,9 @@ class AutoExplore:
             
             # Score: information gain (cluster size) / distance
             # Prefer larger frontiers that are closer
+            # Optimized: weight distance more heavily for faster exploration
             info_gain = len(cluster)
-            score = info_gain / (distance + 0.1)  # Add small epsilon to avoid division by zero
+            score = info_gain / (distance * distance + 0.1)  # Square distance for stronger preference for closer frontiers
             
             if score > best_score:
                 best_score = score
@@ -441,36 +453,40 @@ class AutoExplore:
         """
         Simple wander behavior when map is mostly unknown.
         Moves forward and turns periodically to explore.
+        Optimized for faster exploration with continuous movement.
         """
         now = rospy.Time.now()
-        
-        # Change behavior every 2-4 seconds (randomized)
         elapsed = (now - self.last_wander_action).to_sec()
-        if elapsed < 2.0:
+        
+        # Keep publishing the current command to maintain continuous movement
+        if self.wander_twist is not None and elapsed < 2.0:
+            self.cmd_vel_pub.publish(self.wander_twist)
             return
         
-        # Randomly decide when to change behavior (between 2-4 seconds)
-        if elapsed < 4.0 and self.wander_direction != 0:
+        # Change behavior more frequently for faster exploration (1-2 seconds)
+        if elapsed < 1.0:
             return
         
         self.last_wander_action = now
         
         # Pattern: move forward, then turn, repeat
         if self.wander_direction == 1:
-            # Move forward
+            # Move forward at higher speed with slight random turn for better coverage
             twist = Twist()
-            twist.linear.x = 0.15  # 0.15 m/s forward (slower for safety)
-            twist.angular.z = 0.0
+            twist.linear.x = 0.3  # 0.3 m/s forward (increased for speed)
+            twist.angular.z = random.uniform(-0.1, 0.1)  # Slight random turn while moving
+            self.wander_twist = twist
             self.cmd_vel_pub.publish(twist)
             rospy.loginfo("Auto Explore: Wander mode - moving forward")
             # After moving forward, turn
             self.wander_direction = 0
         elif self.wander_direction == 0:
-            # Turn in place (random direction)
+            # Turn in place (random direction) at higher speed
             turn_dir = random.choice([-1, 1])
             twist = Twist()
             twist.linear.x = 0.0
-            twist.angular.z = 0.3 * turn_dir  # 0.3 rad/s rotation
+            twist.angular.z = 0.6 * turn_dir  # 0.6 rad/s rotation (increased for speed)
+            self.wander_twist = twist
             self.cmd_vel_pub.publish(twist)
             rospy.loginfo("Auto Explore: Wander mode - turning")
             # After turning, move forward again
