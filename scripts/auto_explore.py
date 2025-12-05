@@ -709,11 +709,11 @@ class AutoExplore:
             except Exception as e2:
                 rospy.logwarn("Auto Explore: Still no transform after wait: %s. Proceeding anyway...", str(e2))
         
-        # Create goal - use now() but ensure transform is available first
-        # The small delay above helps ensure transforms are synchronized
+        # Create goal - use Time(0) to get latest available transform
+        # This avoids extrapolation errors when the timestamp is slightly in the future
         goal = MoveBaseGoal()
         goal.target_pose.header.frame_id = "map"
-        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.header.stamp = rospy.Time(0)  # Use latest available transform
         goal.target_pose.pose.position.x = world_x
         goal.target_pose.pose.position.y = world_y
         goal.target_pose.pose.position.z = 0.0
