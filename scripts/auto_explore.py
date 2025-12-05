@@ -65,6 +65,11 @@ class AutoExplore:
         self.move_base_client = None
         self.current_goal = None
         self.goal_status = None
+        self.goal_start_time = None
+        self.goal_timeout = 30.0  # seconds - cancel goal if taking too long (reduced for faster recovery)
+        self.last_robot_position = None
+        self.stuck_check_time = None
+        self.stuck_distance_threshold = 0.1  # meters - if robot moves less than this, consider stuck
         
         # Exploration state
         self.exploring = False
@@ -175,8 +180,15 @@ class AutoExplore:
         # Check if we're currently navigating to a goal (only in frontier mode)
         if self.current_goal is not None and not self.wander_mode:
             rospy.loginfo_throttle(2, "Auto Explore: Currently navigating to goal, checking status...")
-            self._check_goal_status()
-            return
+            if self._check_goal_status():
+                # Goal completed or failed, continue exploration
+                return
+            # Check for timeout or stuck condition
+            if self._check_goal_timeout_or_stuck():
+                # Goal is stuck, cancel it and try a different frontier
+                rospy.logwarn("Auto Explore: Goal appears stuck, cancelling and trying different frontier")
+                self._cancel_current_goal()
+                return
         
         # Cancel any active goals when entering wander mode
         if self.wander_mode and self.current_goal is not None:
@@ -366,15 +378,19 @@ class AutoExplore:
         robot_x, robot_y = self.robot_pose[0], self.robot_pose[1]
         best_frontier = None
         best_score = float('-inf')
+        visited_count = 0
+        total_count = len(frontiers)
         
         for cluster in frontiers:
             # Calculate cluster center
             center_x = sum(x for x, y in cluster) / len(cluster)
             center_y = sum(y for x, y in cluster) / len(cluster)
             
-            # Skip if we've already visited this frontier
-            frontier_key = (int(center_x * 10), int(center_y * 10))
+            # Skip if we've already visited this frontier (use more precise key)
+            # Use 0.5m precision instead of 0.1m to avoid marking nearby frontiers as visited
+            frontier_key = (int(center_x * 2), int(center_y * 2))
             if frontier_key in self.visited_frontiers:
+                visited_count += 1
                 continue
             
             # Calculate distance from robot
@@ -390,7 +406,48 @@ class AutoExplore:
                 best_score = score
                 best_frontier = (center_x, center_y)
         
+        if visited_count > 0:
+            rospy.loginfo("Auto Explore: %d/%d frontiers already visited", visited_count, total_count)
+        
+        if best_frontier is None and total_count > 0:
+            rospy.logwarn("Auto Explore: All %d frontiers are marked as visited. Clearing visited set for distant frontiers.", total_count)
+            # Clear visited frontiers that are far from current position (they might be valid now)
+            self._clear_distant_visited_frontiers()
+            # Try again
+            return self._select_best_frontier(frontiers)
+        
         return best_frontier
+
+    def _clear_distant_visited_frontiers(self):
+        """
+        Clear visited frontiers that are far from the robot's current position.
+        This allows retrying frontiers that may have been marked as visited incorrectly.
+        """
+        if self.robot_pose is None:
+            return
+        
+        robot_x, robot_y = self.robot_pose[0], self.robot_pose[1]
+        cleared_count = 0
+        distance_threshold = 2.0  # Clear frontiers more than 2m away
+        
+        # Convert visited_frontiers set to list for iteration
+        visited_list = list(self.visited_frontiers)
+        
+        for frontier_key in visited_list:
+            # Convert key back to world coordinates (key was created with *2, so divide by 2)
+            frontier_x = frontier_key[0] / 2.0
+            frontier_y = frontier_key[1] / 2.0
+            
+            # Calculate distance
+            distance = math.sqrt((frontier_x - robot_x)**2 + (frontier_y - robot_y)**2)
+            
+            if distance > distance_threshold:
+                self.visited_frontiers.discard(frontier_key)
+                cleared_count += 1
+        
+        if cleared_count > 0:
+            rospy.loginfo("Auto Explore: Cleared %d distant visited frontiers (more than %.1f m away)", 
+                         cleared_count, distance_threshold)
 
     def _is_goal_in_free_space(self, world_x, world_y):
         """
@@ -452,8 +509,8 @@ class AutoExplore:
         # Validate goal is in free space
         if not self._is_goal_in_free_space(world_x, world_y):
             rospy.logwarn("Auto Explore: Skipping frontier at (%.2f, %.2f) - not in free space", world_x, world_y)
-            # Mark as visited anyway to avoid retrying
-            frontier_key = (int(world_x * 10), int(world_y * 10))
+            # Mark as visited to avoid retrying (use same precision as selection)
+            frontier_key = (int(world_x * 2), int(world_y * 2))
             self.visited_frontiers.add(frontier_key)
             return
         
@@ -472,25 +529,30 @@ class AutoExplore:
             self.move_base_client.send_goal(goal)
             self.current_goal = goal
             self.goal_status = None
+            self.goal_start_time = rospy.Time.now()  # Track when goal was sent
+            self.last_robot_position = self.robot_pose  # Track starting position
+            self.stuck_check_time = None  # Reset stuck check timer
             
             # Wait a bit to see if goal was accepted
             rospy.sleep(0.5)
             state = self.move_base_client.get_state()
             rospy.loginfo("Auto Explore: Goal state after send: %d (1=PENDING, 3=ACTIVE)", state)
             
-            # Mark frontier as visited
-            frontier_key = (int(world_x * 10), int(world_y * 10))
-            self.visited_frontiers.add(frontier_key)
+            # Don't mark as visited yet - only mark when goal succeeds
+            # This allows retrying if goal fails or times out
         except Exception as e:
             rospy.logerr("Auto Explore: Failed to send goal: %s", str(e))
             import traceback
             rospy.logerr(traceback.format_exc())
-            self.current_goal = None
+            self._cancel_current_goal()
 
     def _check_goal_status(self):
-        """Check the status of the current navigation goal."""
+        """
+        Check the status of the current navigation goal.
+        Returns True if goal is complete (succeeded or failed), False if still active.
+        """
         if self.move_base_client is None or self.current_goal is None:
-            return
+            return False
         
         try:
             state = self.move_base_client.get_state()
@@ -512,14 +574,86 @@ class AutoExplore:
             
             if state == GoalStatus.SUCCEEDED:
                 rospy.loginfo("Auto Explore: Reached frontier goal!")
-                self.current_goal = None
-                self.goal_status = None
-            elif state in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED]:
+                # Mark frontier as visited only when successfully reached
+                if self.current_goal is not None:
+                    goal_x = self.current_goal.target_pose.pose.position.x
+                    goal_y = self.current_goal.target_pose.pose.position.y
+                    frontier_key = (int(goal_x * 2), int(goal_y * 2))  # Use same precision as selection
+                    self.visited_frontiers.add(frontier_key)
+                    rospy.loginfo("Auto Explore: Marked frontier at (%.2f, %.2f) as visited", goal_x, goal_y)
+                self._cancel_current_goal()
+                return True
+            elif state in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
                 rospy.logwarn("Auto Explore: Goal failed with status %d (%s)", state, status_name)
-                self.current_goal = None
-                self.goal_status = None
+                self._cancel_current_goal()
+                return True
+            else:
+                # Goal is still active
+                return False
         except Exception as e:
             rospy.logwarn("Auto Explore: Error checking goal status: %s", str(e))
+            return False
+
+    def _check_goal_timeout_or_stuck(self):
+        """
+        Check if current goal has timed out or robot is stuck.
+        Returns True if goal should be cancelled, False otherwise.
+        """
+        if self.current_goal is None or self.goal_start_time is None:
+            return False
+        
+        now = rospy.Time.now()
+        elapsed = (now - self.goal_start_time).to_sec()
+        
+        # Check for timeout
+        if elapsed > self.goal_timeout:
+            rospy.logwarn("Auto Explore: Goal timeout after %.1f seconds", elapsed)
+            return True
+        
+        # Check if robot is stuck (not moving)
+        if self.robot_pose is not None:
+            if self.last_robot_position is None:
+                self.last_robot_position = self.robot_pose
+                self.stuck_check_time = now
+                return False
+            
+            # Check if enough time has passed since last position check
+            if self.stuck_check_time is None:
+                self.stuck_check_time = now
+                return False
+            
+            check_elapsed = (now - self.stuck_check_time).to_sec()
+            if check_elapsed > 5.0:  # Check every 5 seconds
+                # Calculate distance moved
+                dx = self.robot_pose[0] - self.last_robot_position[0]
+                dy = self.robot_pose[1] - self.last_robot_position[1]
+                distance_moved = math.sqrt(dx*dx + dy*dy)
+                
+                if distance_moved < self.stuck_distance_threshold:
+                    rospy.logwarn("Auto Explore: Robot appears stuck (moved only %.3f m in %.1f s)", 
+                                 distance_moved, check_elapsed)
+                    return True
+                
+                # Update position tracking
+                self.last_robot_position = self.robot_pose
+                self.stuck_check_time = now
+        
+        return False
+
+    def _cancel_current_goal(self):
+        """Cancel the current navigation goal and reset tracking variables."""
+        if self.current_goal is not None and self.move_base_client is not None:
+            try:
+                self.move_base_client.cancel_all_goals()
+                rospy.loginfo("Auto Explore: Cancelled current goal")
+            except Exception as e:
+                rospy.logwarn("Auto Explore: Error cancelling goal: %s", str(e))
+        
+        self.current_goal = None
+        self.goal_status = None
+        self.goal_start_time = None
+        self.last_robot_position = None
+        self.stuck_check_time = None
 
     def _perform_initial_rotation(self):
         """
