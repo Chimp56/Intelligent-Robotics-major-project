@@ -406,16 +406,27 @@ class AutoExplore:
         
         return clusters
 
-    def _select_best_frontier(self, frontiers):
+    def _select_best_frontier(self, frontiers, recursion_depth=0):
         """
         Select the best frontier to explore based on distance and information gain
         
         Args:
             frontiers: List of frontier clusters
+            recursion_depth: Internal parameter to prevent infinite recursion
         
         Returns:
             (world_x, world_y) tuple representing the center of the best frontier, or None
         """
+        # Prevent infinite recursion
+        MAX_RECURSION_DEPTH = 2
+        if recursion_depth >= MAX_RECURSION_DEPTH:
+            # Use print instead of rospy.logwarn to avoid recursion in logging system
+            try:
+                rospy.logwarn("Auto Explore: Max recursion depth reached in frontier selection. Returning None.")
+            except:
+                print("Auto Explore: Max recursion depth reached in frontier selection. Returning None.")
+            return None
+        
         if not frontiers or self.robot_pose is None:
             return None
         
@@ -467,11 +478,17 @@ class AutoExplore:
             rospy.loginfo("Auto Explore: %d/%d frontiers already visited", visited_count, total_count)
         
         if best_frontier is None and total_count > 0:
-            rospy.logwarn("Auto Explore: All %d frontiers are marked as visited. Clearing visited set for distant frontiers.", total_count)
+            # Use safer logging to prevent recursion errors
+            try:
+                rospy.logwarn("Auto Explore: All %d frontiers are marked as visited. Clearing visited set for distant frontiers.", total_count)
+            except Exception as e:
+                # Fallback to print if logging fails (prevents recursion in logging system)
+                print("Auto Explore: All %d frontiers are marked as visited. Clearing visited set for distant frontiers." % total_count)
+            
             # Clear visited frontiers that are far from current position (they might be valid now)
             self._clear_distant_visited_frontiers()
-            # Try again
-            return self._select_best_frontier(frontiers)
+            # Try again with increased recursion depth
+            return self._select_best_frontier(frontiers, recursion_depth + 1)
         
         return best_frontier
 
