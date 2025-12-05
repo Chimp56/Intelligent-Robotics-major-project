@@ -132,10 +132,11 @@ class AutoExplore:
             self.move_base_client = None
             return False
     
-    def _move_base_feedback_cb(self, goal_handle, feedback):
+    def _move_base_feedback_cb(self, feedback):
         """Safe feedback callback for move_base to prevent AttributeError.
         
         This callback is passed to send_goal() to handle feedback safely.
+        SimpleActionClient calls this with just the feedback message.
         The callback prevents AttributeError when feedback arrives before
         the goal handle is fully initialized.
         """
