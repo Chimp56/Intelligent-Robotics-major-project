@@ -567,25 +567,45 @@ class AutoExplore:
                          world_x, world_y, cell_value)
             return False
         
-        # Check if goal has at least some known free space nearby (move_base needs known space for planning)
-        # Check 3x3 area around goal
-        known_free_nearby = False
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
+        # Check if goal itself is in unknown space - move_base often rejects these
+        if cell_value == UNKNOWN:
+            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) is in unknown space. move_base will likely reject.", 
+                         world_x, world_y)
+            # Still allow it, but be aware it might be rejected
+        
+        # Check if goal has sufficient known free space nearby (move_base needs known space for planning)
+        # Check 5x5 area around goal for better validation
+        known_free_count = 0
+        free_count = 0
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
                 nx, ny = grid_x + dx, grid_y + dy
                 if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
                     neighbor_value = map_array[ny, nx]
-                    # If at least one neighbor is known free space, goal might be reachable
-                    if neighbor_value == FREE or (0 < neighbor_value < FRONTIER_THRESHOLD):
-                        known_free_nearby = True
-                        break
-            if known_free_nearby:
-                break
+                    # Count known free space
+                    if neighbor_value == FREE:
+                        free_count += 1
+                        known_free_count += 1
+                    elif 0 < neighbor_value < FRONTIER_THRESHOLD:
+                        known_free_count += 1
         
-        if not known_free_nearby:
-            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has no known free space nearby (all unknown/occupied)", 
-                         world_x, world_y)
+        # Need at least 5 known free cells nearby for move_base to plan
+        if known_free_count < 5:
+            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has insufficient known free space nearby (%d cells, need 5+)", 
+                         world_x, world_y, known_free_count)
             return False
+        
+        # Also check a buffer around goal for occupied space
+        buffer_cells = 3  # Check 3-cell buffer
+        for dx in range(-buffer_cells, buffer_cells + 1):
+            for dy in range(-buffer_cells, buffer_cells + 1):
+                nx, ny = grid_x + dx, grid_y + dy
+                if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                    buffer_value = map_array[ny, nx]
+                    if buffer_value >= FRONTIER_THRESHOLD:
+                        rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has occupied space in buffer (value: %d at grid %d,%d)", 
+                                     world_x, world_y, buffer_value, nx, ny)
+                        return False
         
         return True
 
@@ -700,7 +720,17 @@ class AutoExplore:
             # Wait a bit to see if goal was accepted
             rospy.sleep(0.5)
             state = self.move_base_client.get_state()
-            rospy.loginfo("Auto Explore: Goal state after send: %d (1=PENDING, 3=ACTIVE)", state)
+            rospy.loginfo("Auto Explore: Goal state after send: %d (1=PENDING, 3=ACTIVE, 2=REJECTED)", state)
+            
+            # Check if goal was immediately rejected
+            if state == GoalStatus.REJECTED:
+                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) was immediately rejected by move_base. Marking as visited.", 
+                           world_x, world_y)
+                # Mark as visited to avoid retrying
+                frontier_key = (int(world_x * 2), int(world_y * 2))
+                self.visited_frontiers.add(frontier_key)
+                self._cancel_current_goal()
+                return
             
             # Don't mark as visited yet - only mark when goal succeeds
             # This allows retrying if goal fails or times out
