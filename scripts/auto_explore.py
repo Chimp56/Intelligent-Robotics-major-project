@@ -7,6 +7,7 @@ Frontier exploration
 import rospy
 import numpy as np
 import math
+import random
 import tf
 from collections import deque
 from geometry_msgs.msg import Twist, PoseStamped
@@ -57,6 +58,9 @@ class AutoExplore:
         self.exploring = False
         self.last_frontier_check = rospy.Time.now()
         self.visited_frontiers = set()
+        self.wander_mode = True  # Start in wander mode until map has free space
+        self.last_wander_action = rospy.Time.now()
+        self.wander_direction = 1  # 1 for forward, -1 for backward
         
         # Now create publishers and subscribers (after all variables are initialized)
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
@@ -132,11 +136,21 @@ class AutoExplore:
                               self.map_info.height if self.map_info else 0,
                               self.robot_pose[0], self.robot_pose[1])
         
-        # Check if we're currently navigating to a goal
-        if self.current_goal is not None:
+        # Check if we're currently navigating to a goal (only in frontier mode)
+        if self.current_goal is not None and not self.wander_mode:
             rospy.loginfo_throttle(2, "Auto Explore: Currently navigating to goal, checking status...")
             self._check_goal_status()
             return
+        
+        # Cancel any active goals when entering wander mode
+        if self.wander_mode and self.current_goal is not None:
+            if self.move_base_client is not None:
+                try:
+                    self.move_base_client.cancel_all_goals()
+                    rospy.loginfo("Auto Explore: Cancelled goal to enter wander mode")
+                except:
+                    pass
+            self.current_goal = None
         
         # Check for new frontiers periodically
         now = rospy.Time.now()
@@ -145,6 +159,28 @@ class AutoExplore:
         
         self.last_frontier_check = now
         
+        # Check if map has enough free space for frontier detection
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        free_count = np.sum((map_array == FREE) | ((map_array > 0) & (map_array < FRONTIER_THRESHOLD)))
+        unknown_count = np.sum(map_array == UNKNOWN)
+        total_cells = self.map_info.width * self.map_info.height
+        
+        # If map is mostly unknown (less than 5% free), use simple wander behavior
+        if free_count < total_cells * 0.05:
+            if not self.wander_mode:
+                rospy.loginfo("Auto Explore: Map mostly unknown (%.1f%% free), switching to wander mode", 
+                             (free_count / float(total_cells)) * 100)
+                self.wander_mode = True
+            rospy.loginfo_throttle(5, "Auto Explore: Wander mode - building initial map (%.1f%% free)", 
+                                 (free_count / float(total_cells)) * 100)
+            self._wander_explore()
+            return
+        
+        # Map has enough free space, switch to frontier-based exploration
+        if self.wander_mode:
+            rospy.loginfo("Auto Explore: Switching from wander mode to frontier-based exploration")
+            self.wander_mode = False
+        
         # Find frontiers
         rospy.loginfo("Auto Explore: Searching for frontiers...")
         frontiers = self._find_frontiers()
@@ -152,8 +188,8 @@ class AutoExplore:
         rospy.loginfo("Auto Explore: Found %d frontier clusters", len(frontiers))
         
         if not frontiers:
-            rospy.logwarn("Auto Explore: No frontiers found. Exploration may be complete or map is fully explored.")
-            # Optionally signal mapping completion
+            rospy.logwarn("Auto Explore: No frontiers found. Using wander mode to explore more.")
+            self._wander_explore()
             return
         
         # Select best frontier
@@ -401,6 +437,45 @@ class AutoExplore:
         except Exception as e:
             rospy.logwarn("Auto Explore: Error checking goal status: %s", str(e))
 
+    def _wander_explore(self):
+        """
+        Simple wander behavior when map is mostly unknown.
+        Moves forward and turns periodically to explore.
+        """
+        now = rospy.Time.now()
+        
+        # Change behavior every 2-4 seconds (randomized)
+        elapsed = (now - self.last_wander_action).to_sec()
+        if elapsed < 2.0:
+            return
+        
+        # Randomly decide when to change behavior (between 2-4 seconds)
+        if elapsed < 4.0 and self.wander_direction != 0:
+            return
+        
+        self.last_wander_action = now
+        
+        # Pattern: move forward, then turn, repeat
+        if self.wander_direction == 1:
+            # Move forward
+            twist = Twist()
+            twist.linear.x = 0.15  # 0.15 m/s forward (slower for safety)
+            twist.angular.z = 0.0
+            self.cmd_vel_pub.publish(twist)
+            rospy.loginfo("Auto Explore: Wander mode - moving forward")
+            # After moving forward, turn
+            self.wander_direction = 0
+        elif self.wander_direction == 0:
+            # Turn in place (random direction)
+            turn_dir = random.choice([-1, 1])
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.3 * turn_dir  # 0.3 rad/s rotation
+            self.cmd_vel_pub.publish(twist)
+            rospy.loginfo("Auto Explore: Wander mode - turning")
+            # After turning, move forward again
+            self.wander_direction = 1
+
     def _cb_map(self, msg):
         """
         Callback for map messages
@@ -455,6 +530,12 @@ class AutoExplore:
                     except:
                         pass
                     self.current_goal = None
+                # Stop wander behavior
+                if self.wander_mode:
+                    twist = Twist()  # Zero velocity
+                    self.cmd_vel_pub.publish(twist)
+                    self.wander_mode = False
+                    rospy.loginfo("Auto Explore: Stopped wander mode due to state change")
         except ValueError as e:
             rospy.logwarn("Auto Explore: Unknown state: %s (error: %s)", msg.data, str(e))
         except AttributeError as e:
