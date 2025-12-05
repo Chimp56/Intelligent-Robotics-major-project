@@ -509,11 +509,11 @@ class Controller:
         """Handle MAPPING state - robot explores and builds map."""
         rospy.loginfo_throttle(5, "MAPPING: Building map...")
         # Monitor mapping progress
-        if self.mapping_complete:
-            rospy.loginfo("Mapping complete signal received")
-            self._stop_gmapping()
-            self._start_amcl()
-            self.transition_to(RobotState.IDLE)
+        # if self.mapping_complete:
+        #     rospy.loginfo("Mapping complete signal received")
+        #     # self._stop_gmapping()
+        #     # self._start_amcl()
+        #     self.transition_to(RobotState.IDLE)
     
     def _handle_navigating(self):
         """Handle NAVIGATING state - robot navigates to a goal."""
