@@ -238,20 +238,52 @@ class AutoExploreRRT:
     
     def _get_robot_state(self):
         """
-        Get current move_base goal state.
-        Returns 1 if busy (ACTIVE/PENDING), 0 if available.
-        """
-        if self.move_base_client is None:
-            return 0
+        Get robot state: 0 = available, 1 = busy (has active goal).
+        Based on ros_autonomous_slam/scripts/functions.py robot.getState()
         
-        try:
-            state = self.move_base_client.get_state()
-            if state in [GoalStatus.ACTIVE, GoalStatus.PENDING, GoalStatus.PREEMPTING]:
+        Returns:
+            0 if available, 1 if busy
+        """
+        if self.use_simple_interface:
+            # For simple interface, check if we have an assigned point
+            if self.assigned_point is not None:
+                # Check if goal is reached or too old
+                if self.goal_start_time is not None:
+                    elapsed = (rospy.Time.now() - self.goal_start_time).to_sec()
+                    if elapsed > GOAL_TIMEOUT:
+                        # Goal timed out, consider robot available
+                        rospy.logwarn("Auto Explore RRT: Simple interface goal timed out after %.1f s, marking as available", elapsed)
+                        self.assigned_point = None
+                        self.goal_start_time = None
+                        return 0
+                # Check if robot reached goal
+                if self.robot_pose is not None and self.assigned_point is not None:
+                    distance = norm(self.robot_pose - self.assigned_point)
+                    if distance < 0.3:  # Within 30cm of goal
+                        rospy.loginfo("Auto Explore RRT: Goal reached (distance: %.2f m)", distance)
+                        self.assigned_point = None
+                        self.goal_start_time = None
+                        return 0
                 return 1  # Busy
-            else:
-                return 0  # Available
-        except:
-            return 0
+            return 0  # Available
+        else:
+            if self.move_base_client is None:
+                return 0
+            try:
+                state = self.move_base_client.get_state()
+                if state in [GoalStatus.ACTIVE, GoalStatus.PENDING, GoalStatus.PREEMPTING]:
+                    return 1  # Busy
+                elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                    # Goal completed or failed, mark as available
+                    if self.assigned_point is not None:
+                        rospy.loginfo("Auto Explore RRT: Goal completed/failed (state: %d), marking as available", state)
+                        self.assigned_point = None
+                        self.goal_start_time = None
+                    return 0  # Available
+                else:
+                    return 0  # Available
+            except:
+                return 0
     
     def _sample_candidate_points(self, num_samples):
         """
@@ -794,8 +826,9 @@ class AutoExploreRRT:
                                    self.map_data is not None, self.map_info is not None, self.robot_pose is not None)
             return
         
-        # Check for goal timeout (only if using move_base, not direct navigation)
-        if not self.use_direct_navigation and self._check_goal_timeout():
+        # Check for goal timeout (only if using move_base actionlib, not direct navigation or simple interface)
+        if not self.use_direct_navigation and not self.use_simple_interface and self._check_goal_timeout():
+            rospy.loginfo("Auto Explore RRT: Goal timed out, will try new goal on next iteration")
             rospy.sleep(DELAY_AFTER_ASSIGNMENT)
             return
         
@@ -924,8 +957,37 @@ class AutoExploreRRT:
                 self._send_goal(best_waypoint)
             rospy.sleep(DELAY_AFTER_ASSIGNMENT)
         elif robot_state == 1:
-            # Robot is busy, just log
+            # Robot is busy, but check if it's actually moving
+            if self.robot_pose is not None and self.last_robot_position is not None:
+                distance_moved = norm(self.robot_pose - self.last_robot_position)
+                if distance_moved < 0.05:  # Moved less than 5cm
+                    # Check how long it's been stuck
+                    if self.stuck_check_time is None:
+                        self.stuck_check_time = rospy.Time.now()
+                    else:
+                        stuck_elapsed = (rospy.Time.now() - self.stuck_check_time).to_sec()
+                        if stuck_elapsed > 10.0:  # Stuck for 10 seconds
+                            rospy.logwarn("Auto Explore RRT: Robot marked as busy but stuck (moved %.3f m in %.1f s), forcing new goal", 
+                                        distance_moved, stuck_elapsed)
+                            # Force robot to be available so it can get a new goal
+                            self.assigned_point = None
+                            self.goal_start_time = None
+                            self.stuck_check_time = None
+                            if self.use_simple_interface:
+                                pass  # Simple interface doesn't need cancellation
+                            elif self.move_base_client is not None:
+                                try:
+                                    self.move_base_client.cancel_goal()
+                                except:
+                                    pass
+                else:
+                    # Robot is moving, reset stuck timer
+                    self.stuck_check_time = None
+                    self.last_robot_position = self.robot_pose.copy()
             rospy.logdebug("Auto Explore RRT: Robot busy, waiting for goal completion")
+        else:
+            # No revenues or robot state unknown - this shouldn't happen, log it
+            rospy.logwarn_throttle(5.0, "Auto Explore RRT: No goal assigned - revenues: %d, robot_state: %d", len(revenues) if revenues else 0, robot_state)
     
     def run(self):
         """
