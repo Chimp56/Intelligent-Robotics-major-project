@@ -88,6 +88,8 @@ class AutoExploreRRT:
         self.wander_start_time = None
         self.last_wander_action = None
         self.wander_direction = 1  # 1 = forward, 0 = turning
+        self.wander_start_position = None  # Track where wander started
+        self.wander_stuck_count = 0  # Count how many times we've been stuck
         self.initial_rotation_done = False
         self.initial_rotation_start_time = None
         self.initial_rotation_accumulated = 0.0
@@ -137,6 +139,8 @@ class AutoExploreRRT:
                     # Reset wander mode
                     self.wander_mode = False
                     self.wander_start_time = None
+                    self.wander_start_position = None
+                    self.wander_stuck_count = 0
                     if self.move_base_client is not None:
                         self.move_base_client.cancel_all_goals()
                     rospy.loginfo("Auto Explore RRT: Starting continuous exploration")
@@ -919,22 +923,60 @@ class AutoExploreRRT:
         """
         if self.wander_start_time is None:
             self.wander_start_time = rospy.Time.now()
+            self.wander_start_position = self.robot_pose.copy() if self.robot_pose is not None else None
             rospy.loginfo("Auto Explore RRT: Entering wander mode to build initial map")
         
-        # Check if we should exit wander mode (after some time or when map has enough free space)
+        # Check if robot has moved far from start position
+        if self.wander_start_position is not None and self.robot_pose is not None:
+            distance_from_start = norm(self.robot_pose - self.wander_start_position)
+            wander_duration = (rospy.Time.now() - self.wander_start_time).to_sec()
+            
+            # If we've been wandering for a while and haven't moved much, try to exit
+            if wander_duration > 30.0 and distance_from_start < 1.0:
+                rospy.logwarn("Auto Explore RRT: Wander mode stuck in same area (moved %.2f m in %.1f s), trying to exit", 
+                             distance_from_start, wander_duration)
+                self.wander_stuck_count += 1
+                if self.wander_stuck_count > 3:
+                    rospy.logwarn("Auto Explore RRT: Wander mode stuck multiple times, forcing exit")
+                    self.wander_mode = False
+                    self.wander_start_time = None
+                    self.wander_start_position = None
+                    self.wander_stuck_count = 0
+                    twist = Twist()  # Stop
+                    self.cmd_vel_pub.publish(twist)
+                    return
+        
+        # Check if we should exit wander mode (when map has enough free space OR robot is in known space)
         if self.map_data is not None and self.map_info is not None:
             map_array = np.array(self.map_data)
             total = len(map_array)
             free = np.sum((map_array == FREE) | ((map_array > 0) & (map_array < 50)))
             free_pct = float(free) / total if total > 0 else 0.0
             
-            # Exit wander mode if we have enough known free space
-            if free_pct > 0.10:  # More than 10% free space
+            # Check if robot is now in known free space
+            robot_in_known_space = False
+            if self.robot_pose is not None:
+                robot_x, robot_y = self.robot_pose
+                resolution = self.map_info.resolution
+                origin_x = self.map_info.origin.position.x
+                origin_y = self.map_info.origin.position.y
+                robot_grid_x = int((robot_x - origin_x) / resolution)
+                robot_grid_y = int((robot_y - origin_y) / resolution)
+                
+                if 0 <= robot_grid_x < self.map_info.width and 0 <= robot_grid_y < self.map_info.height:
+                    map_array_2d = map_array.reshape((self.map_info.height, self.map_info.width))
+                    robot_cell_value = map_array_2d[robot_grid_y, robot_grid_x]
+                    robot_in_known_space = (robot_cell_value == FREE or (0 < robot_cell_value < 50))
+            
+            # Exit wander mode if we have enough known free space OR robot is in known space
+            if free_pct > 0.10 or robot_in_known_space:
                 wander_duration = (rospy.Time.now() - self.wander_start_time).to_sec()
-                rospy.loginfo("Auto Explore RRT: Exiting wander mode after %.1f seconds (%.1f%% free space)", 
-                             wander_duration, free_pct * 100)
+                rospy.loginfo("Auto Explore RRT: Exiting wander mode after %.1f seconds (%.1f%% free space, robot in known space: %s)", 
+                             wander_duration, free_pct * 100, robot_in_known_space)
                 self.wander_mode = False
                 self.wander_start_time = None
+                self.wander_start_position = None
+                self.wander_stuck_count = 0
                 twist = Twist()  # Stop
                 self.cmd_vel_pub.publish(twist)
                 return
@@ -958,41 +1000,48 @@ class AutoExploreRRT:
             self.last_wander_action = now
             return
         
-        # Alternate between moving forward and turning in a circle pattern
-        if elapsed < 2.0:
-            # Continue current action
+        # Spiral exploration pattern - move forward with increasing turn to explore new areas
+        # This prevents looping in the same place
+        wander_duration = (now - self.wander_start_time).to_sec()
+        
+        # Use spiral pattern: forward with gradually increasing angular velocity
+        # This creates a spiral that explores outward
+        if elapsed < 3.0:  # Continue current action for 3 seconds
             if self.wander_direction == 1:  # Moving forward
+                # Spiral outward - increase turn rate over time
+                spiral_factor = min(1.0, wander_duration / 20.0)  # Gradually increase over 20 seconds
                 twist = Twist()
-                twist.linear.x = 0.2
-                twist.angular.z = 0.2  # Slight curve
+                twist.linear.x = 0.25  # Slightly faster forward
+                twist.angular.z = 0.3 * spiral_factor  # Gradually increase turn
                 self.cmd_vel_pub.publish(twist)
             else:  # Turning
                 twist = Twist()
                 twist.linear.x = 0.0
-                twist.angular.z = 0.4
+                twist.angular.z = 0.5  # Turn faster
                 self.cmd_vel_pub.publish(twist)
             return
         
-        # Change behavior every 2 seconds
+        # Change behavior every 3 seconds
         self.last_wander_action = now
         
-        # Alternate between forward movement and turning
+        # Alternate between forward movement (spiral) and turning
         if self.wander_direction == 1:
-            # Switch to turning
+            # Switch to turning (turn for shorter time to break out of loops)
             self.wander_direction = 0
             twist = Twist()
             twist.linear.x = 0.0
-            twist.angular.z = 0.4
+            twist.angular.z = 0.6  # Turn faster to break loops
             self.cmd_vel_pub.publish(twist)
-            rospy.loginfo_throttle(3, "Auto Explore RRT: Wandering - turning")
+            rospy.loginfo_throttle(3, "Auto Explore RRT: Wandering - turning (spiral exploration)")
         else:
-            # Switch to forward movement
+            # Switch to forward movement with spiral
             self.wander_direction = 1
+            spiral_factor = min(1.0, wander_duration / 20.0)
             twist = Twist()
-            twist.linear.x = 0.2
-            twist.angular.z = 0.2  # Slight curve to create circular pattern
+            twist.linear.x = 0.25
+            twist.angular.z = 0.3 * spiral_factor  # Spiral outward
             self.cmd_vel_pub.publish(twist)
-            rospy.loginfo_throttle(3, "Auto Explore RRT: Wandering - moving forward")
+            rospy.loginfo_throttle(3, "Auto Explore RRT: Wandering - moving forward (spiral, factor=%.2f)", spiral_factor)
     
     def _check_obstacle_ahead(self):
         """
