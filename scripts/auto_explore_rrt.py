@@ -41,7 +41,7 @@ COSTMAP_CLEARING_THRESHOLD = 70  # Threshold for costmap clearing
 RATE_HZ = 10.0  # Hz - main loop rate (matching assigner.py)
 DELAY_AFTER_ASSIGNMENT = 0.5  # seconds - delay after assigning goal
 MIN_GOAL_DISTANCE = 0.5  # Minimum distance from robot to goal (meters)
-MAX_GOAL_DISTANCE = 10.0  # Maximum distance from robot to goal (meters)
+MAX_GOAL_DISTANCE = 3.0  # Maximum distance from robot to goal (meters) - reduced for better reachability
 GOAL_TIMEOUT = 30.0  # seconds - timeout for reaching a goal
 NUM_CANDIDATE_SAMPLES = 30  # Number of candidate points to sample per iteration
 
@@ -253,7 +253,21 @@ class AutoExploreRRT:
                 # Check distance from robot
                 distance = norm(self.robot_pose - np.array([x, y]))
                 if MIN_GOAL_DISTANCE <= distance <= MAX_GOAL_DISTANCE:
-                    candidates.append([x, y])
+                    # Prefer points in known free space (move_base can plan to these)
+                    # But also allow unknown space (we'll project it later)
+                    resolution = self.map_info.resolution
+                    origin_x = self.map_info.origin.position.x
+                    origin_y = self.map_info.origin.position.y
+                    grid_x = int((x - origin_x) / resolution)
+                    grid_y = int((y - origin_y) / resolution)
+                    
+                    if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+                        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+                        cell_value = map_array[grid_y, grid_x]
+                        
+                        # Prefer known free space, but allow unknown (will be projected)
+                        if cell_value == FREE or (0 < cell_value < 50) or cell_value == UNKNOWN:
+                            candidates.append([x, y])
         
         return candidates
     
@@ -394,10 +408,80 @@ class AutoExploreRRT:
         rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) has unexpected cell value: %d", world_x, world_y, cell_value)
         return False
     
+    def _project_goal_to_known_space(self, world_x, world_y, max_search_radius=1.0):
+        """
+        If the goal is in unknown space, project it to the nearest known free space.
+        move_base cannot plan to unknown space, so we need known free space.
+        
+        Args:
+            world_x, world_y: Original goal coordinates
+            max_search_radius: Maximum distance to search for known free space (meters)
+        
+        Returns:
+            (projected_x, projected_y) - either the original coordinates if already in known space,
+            or the nearest known free space coordinates
+        """
+        if self.map_data is None or self.map_info is None:
+            return world_x, world_y  # Can't project without map
+        
+        # Convert to grid coordinates
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        # Check bounds
+        if grid_x < 0 or grid_x >= self.map_info.width or grid_y < 0 or grid_y >= self.map_info.height:
+            return world_x, world_y  # Out of bounds, can't project
+        
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        cell_value = map_array[grid_y, grid_x]
+        
+        # If goal is already in known free space, return as-is
+        if cell_value == FREE or (0 < cell_value < 50):
+            return world_x, world_y
+        
+        # Goal is in unknown or occupied space - search for nearest known free space
+        max_search_cells = int(max_search_radius / resolution)
+        best_x, best_y = world_x, world_y
+        best_distance = float('inf')
+        
+        # Search in expanding circles
+        for radius in range(1, max_search_cells + 1):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    # Only check cells on the perimeter of this radius
+                    if abs(dx) != radius and abs(dy) != radius:
+                        continue
+                    
+                    nx, ny = grid_x + dx, grid_y + dy
+                    if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                        neighbor_value = map_array[ny, nx]
+                        # Check if this is known free space
+                        if neighbor_value == FREE or (0 < neighbor_value < 50):
+                            # Convert back to world coordinates
+                            candidate_x = nx * resolution + origin_x
+                            candidate_y = ny * resolution + origin_y
+                            distance = math.sqrt((candidate_x - world_x)**2 + (candidate_y - world_y)**2)
+                            
+                            if distance < best_distance:
+                                best_distance = distance
+                                best_x, best_y = candidate_x, candidate_y
+            
+            # If we found a candidate, return it (don't search further)
+            if best_distance < float('inf'):
+                return best_x, best_y
+        
+        # No known free space found within max radius - return original
+        return world_x, world_y
+    
     def _send_goal(self, waypoint):
         """
         Send goal to move_base.
         Based on ros_autonomous_slam/scripts/functions.py robot.sendGoal()
+        Projects goals from unknown space to known free space (move_base needs known space to plan)
         
         Args:
             waypoint: [x, y] tuple
@@ -408,11 +492,16 @@ class AutoExploreRRT:
         
         world_x, world_y = waypoint
         
-        # Validate goal before sending (very lenient for exploration)
-        if not self._is_goal_valid(world_x, world_y):
-            rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is invalid, skipping", world_x, world_y)
-            # Log map info for debugging
-            if self.map_info is not None:
+        # Project goal to known free space if needed (move_base can't plan to unknown space)
+        # This is critical - move_base needs known free space to plan paths
+        projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y, max_search_radius=1.5)
+        if projected_x != world_x or projected_y != world_y:
+            rospy.loginfo("Auto Explore RRT: Projected goal from (%.2f, %.2f) to (%.2f, %.2f) (moved to known free space)", 
+                         world_x, world_y, projected_x, projected_y)
+            world_x, world_y = projected_x, projected_y
+        else:
+            # Check if original goal is in unknown space - if so, log a warning
+            if self.map_data is not None and self.map_info is not None:
                 resolution = self.map_info.resolution
                 origin_x = self.map_info.origin.position.x
                 origin_y = self.map_info.origin.position.y
@@ -421,22 +510,14 @@ class AutoExploreRRT:
                 if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
                     map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
                     cell_value = map_array[grid_y, grid_x]
-                    rospy.logwarn("Auto Explore RRT: Goal cell value: %d (grid: %d, %d)", cell_value, grid_x, grid_y)
-            self.assigned_point = None
-            return
+                    if cell_value == UNKNOWN:
+                        rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is in unknown space and couldn't be projected - move_base may not be able to plan", 
+                                    world_x, world_y)
         
-        # Wait for transform to be available
-        try:
-            self.tf_listener.waitForTransform("map", "odom", rospy.Time(0), rospy.Duration(2.0))
-            (trans, rot) = self.tf_listener.lookupTransform("map", "odom", rospy.Time(0))
-            rospy.sleep(0.05)
-        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
-            rospy.logwarn("Auto Explore RRT: Transform not available: %s", str(e))
-        
-        # Create goal
+        # Create goal (exactly like ros_autonomous_slam robot.sendGoal())
         goal = MoveBaseGoal()
         goal.target_pose.header.frame_id = "map"
-        goal.target_pose.header.stamp = rospy.Time(0)  # Use latest available transform
+        goal.target_pose.header.stamp = rospy.Time.now()  # Use now() like ros_autonomous_slam
         goal.target_pose.pose.position.x = world_x
         goal.target_pose.pose.position.y = world_y
         goal.target_pose.pose.position.z = 0.0
@@ -452,36 +533,16 @@ class AutoExploreRRT:
             
             rospy.loginfo("Auto Explore RRT: Assigned goal (%.2f, %.2f)", world_x, world_y)
             
-            # Wait a bit to see if goal was accepted
-            rospy.sleep(0.5)
+            # Wait a bit to see if goal was accepted (like ros_autonomous_slam)
+            rospy.sleep(0.1)
             state = self.move_base_client.get_state()
             
-            # Log goal state with descriptive names
-            state_names = {
-                GoalStatus.PENDING: "PENDING",
-                GoalStatus.ACTIVE: "ACTIVE",
-                GoalStatus.PREEMPTED: "PREEMPTED",
-                GoalStatus.SUCCEEDED: "SUCCEEDED",
-                GoalStatus.ABORTED: "ABORTED",
-                GoalStatus.REJECTED: "REJECTED",
-                GoalStatus.PREEMPTING: "PREEMPTING",
-                GoalStatus.RECALLING: "RECALLING",
-                GoalStatus.RECALLED: "RECALLED",
-                GoalStatus.LOST: "LOST"
-            }
-            state_name = state_names.get(state, "UNKNOWN")
-            rospy.loginfo("Auto Explore RRT: Goal state after send: %d (%s)", state, state_name)
-            
             if state == GoalStatus.REJECTED:
-                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base - may be in invalid location")
-                self.assigned_point = None
-                self.goal_start_time = None
-            elif state in [GoalStatus.ABORTED, GoalStatus.LOST]:
-                rospy.logwarn("Auto Explore RRT: Goal failed with status %d (%s)", state, state_name)
+                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base")
                 self.assigned_point = None
                 self.goal_start_time = None
             elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
-                rospy.loginfo("Auto Explore RRT: Goal accepted, robot should start moving")
+                rospy.loginfo("Auto Explore RRT: Goal accepted")
         except Exception as e:
             rospy.logerr("Auto Explore RRT: Failed to send goal: %s", str(e))
             import traceback
@@ -510,14 +571,18 @@ class AutoExploreRRT:
                             if distance_moved > 0.1:  # Moved more than 10cm
                                 self.last_robot_position = self.robot_pose.copy()
                                 self.stuck_check_time = rospy.Time.now()
-                            elif stuck_elapsed > 10.0:  # Stuck for 10 seconds
-                                rospy.logwarn("Auto Explore RRT: Robot appears stuck (moved %.3f m in %.1f s), cancelling goal", 
+                            elif stuck_elapsed > 8.0:  # Stuck for 8 seconds - cancel and try different goal
+                                rospy.logwarn("Auto Explore RRT: Robot appears stuck (moved %.3f m in %.1f s), cancelling goal and trying closer one", 
                                             distance_moved, stuck_elapsed)
                                 self.move_base_client.cancel_goal()
                                 self.assigned_point = None
                                 self.goal_start_time = None
                                 self.last_robot_position = None
                                 self.stuck_check_time = None
+                                # Mark this goal as problematic by adding to visited (so we don't retry immediately)
+                                if self.robot_pose is not None:
+                                    waypoint_key = (int(self.robot_pose[0] * 2), int(self.robot_pose[1] * 2))
+                                    # Don't add to visited - let it try a different goal
                                 return True
                     
                     # Log progress periodically
