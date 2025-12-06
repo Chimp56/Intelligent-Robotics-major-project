@@ -41,7 +41,8 @@ COSTMAP_CLEARING_THRESHOLD = 70  # Threshold for costmap clearing
 RATE_HZ = 10.0  # Hz - main loop rate (matching assigner.py)
 DELAY_AFTER_ASSIGNMENT = 0.5  # seconds - delay after assigning goal
 MIN_GOAL_DISTANCE = 0.5  # Minimum distance from robot to goal (meters)
-MAX_GOAL_DISTANCE = 3.0  # Maximum distance from robot to goal (meters) - reduced for better reachability
+MAX_GOAL_DISTANCE = 1.5  # Maximum distance from robot to goal (meters) - reduced for better reachability
+MIN_GOAL_DISTANCE = 0.3  # Minimum distance from robot to goal (meters)
 GOAL_TIMEOUT = 30.0  # seconds - timeout for reaching a goal
 NUM_CANDIDATE_SAMPLES = 30  # Number of candidate points to sample per iteration
 
@@ -82,6 +83,9 @@ class AutoExploreRRT:
         self.candidate_points = []  # List of candidate exploration points
         self.last_robot_position = None  # Track robot position for stuck detection
         self.stuck_check_time = None
+        self.move_base_failure_count = 0  # Track consecutive move_base failures
+        self.use_direct_navigation = False  # Fallback to direct navigation when move_base fails
+        self.direct_nav_goal = None  # Current direct navigation goal
         
         # Wander mode for early exploration
         self.wander_mode = False
@@ -630,10 +634,19 @@ class AutoExploreRRT:
             
             if state == GoalStatus.REJECTED:
                 rospy.logwarn("Auto Explore RRT: Goal rejected by move_base")
+                self.move_base_failure_count += 1
                 self.assigned_point = None
                 self.goal_start_time = None
+                
+                # After 3 consecutive failures, switch to direct navigation
+                if self.move_base_failure_count >= 3:
+                    rospy.logwarn("Auto Explore RRT: move_base failed %d times consecutively, will use direct navigation for next goal", 
+                                self.move_base_failure_count)
+                    self.use_direct_navigation = True
             elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                 rospy.loginfo("Auto Explore RRT: Goal accepted")
+                self.move_base_failure_count = 0  # Reset on success
+                self.use_direct_navigation = False  # Reset direct navigation flag
         except Exception as e:
             rospy.logerr("Auto Explore RRT: Failed to send goal: %s", str(e))
             import traceback
@@ -726,9 +739,14 @@ class AutoExploreRRT:
                                    self.map_data is not None, self.map_info is not None, self.robot_pose is not None)
             return
         
-        # Check for goal timeout
-        if self._check_goal_timeout():
+        # Check for goal timeout (only if using move_base, not direct navigation)
+        if not self.use_direct_navigation and self._check_goal_timeout():
             rospy.sleep(DELAY_AFTER_ASSIGNMENT)
+            return
+        
+        # If using direct navigation, continue navigating
+        if self.use_direct_navigation and self.direct_nav_goal is not None:
+            self._navigate_directly(self.direct_nav_goal.tolist())
             return
         
         # Check if we should do initial rotation when starting (do this first)
@@ -825,7 +843,12 @@ class AutoExploreRRT:
                          best_waypoint[0], best_waypoint[1], revenues[winner_id], 
                          info_gains[winner_id], norm(robot_pos - np.array(best_waypoint)))
             
-            self._send_goal(best_waypoint)
+            # Use direct navigation if move_base has been failing
+            if self.use_direct_navigation:
+                rospy.loginfo("Auto Explore RRT: Using direct navigation (move_base fallback)")
+                self._navigate_directly(best_waypoint)
+            else:
+                self._send_goal(best_waypoint)
             rospy.sleep(DELAY_AFTER_ASSIGNMENT)
         elif robot_state == 1:
             # Robot is busy, just log
@@ -1083,6 +1106,82 @@ class AutoExploreRRT:
             return True
         
         return False
+    
+    def _navigate_directly(self, waypoint):
+        """
+        Direct navigation using cmd_vel when move_base is failing.
+        Simple approach: turn toward goal, then move forward.
+        
+        Args:
+            waypoint: [x, y] tuple
+        """
+        if self.robot_pose is None:
+            return
+        
+        world_x, world_y = waypoint
+        robot_x, robot_y = self.robot_pose
+        
+        # Calculate distance and angle to goal
+        dx = world_x - robot_x
+        dy = world_y - robot_y
+        distance = math.sqrt(dx*dx + dy*dy)
+        target_angle = math.atan2(dy, dx)
+        
+        # Get current robot yaw
+        current_yaw = self.robot_yaw if self.robot_yaw is not None else 0.0
+        
+        # Calculate angle difference
+        angle_diff = target_angle - current_yaw
+        # Normalize to [-pi, pi]
+        while angle_diff > math.pi:
+            angle_diff -= 2 * math.pi
+        while angle_diff < -math.pi:
+            angle_diff += 2 * math.pi
+        
+        # Check for obstacles
+        obstacle_ahead = self._check_obstacle_ahead()
+        
+        # If close enough, stop
+        if distance < 0.3:
+            rospy.loginfo("Auto Explore RRT: Direct navigation goal reached (distance: %.2f m)", distance)
+            self.direct_nav_goal = None
+            self.assigned_point = None
+            twist = Twist()
+            self.cmd_vel_pub.publish(twist)
+            # Reset move_base failure count on success
+            self.move_base_failure_count = 0
+            self.use_direct_navigation = False
+            return
+        
+        # If obstacle ahead, turn away
+        if obstacle_ahead:
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.5  # Turn away
+            self.cmd_vel_pub.publish(twist)
+            return
+        
+        # Turn toward goal if not aligned
+        if abs(angle_diff) > 0.2:  # ~11 degrees
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.4 if angle_diff > 0 else -0.4
+            self.cmd_vel_pub.publish(twist)
+            rospy.loginfo_throttle(2, "Auto Explore RRT: Direct nav - turning toward goal (angle diff: %.2f rad)", angle_diff)
+        else:
+            # Move forward toward goal
+            twist = Twist()
+            # Slow down as we approach goal
+            speed = min(0.2, distance * 0.3)
+            twist.linear.x = speed
+            twist.angular.z = 0.1 * angle_diff  # Small correction
+            self.cmd_vel_pub.publish(twist)
+            rospy.loginfo_throttle(2, "Auto Explore RRT: Direct nav - moving toward goal (distance: %.2f m, speed: %.2f)", 
+                                 distance, speed)
+        
+        # Track goal
+        self.direct_nav_goal = np.array([world_x, world_y])
+        self.assigned_point = self.direct_nav_goal
 
 
 if __name__ == '__main__':
