@@ -226,7 +226,18 @@ class AutoExploreRRT:
         height = self.map_info.height * self.map_info.resolution
         robot_x, robot_y = self.robot_pose
         
-        exploration_radius = 10.0
+        # Check how much of the map is known free space
+        map_array = np.array(self.map_data)
+        total = len(map_array)
+        free = np.sum((map_array == FREE) | ((map_array > 0) & (map_array < 50)))
+        free_pct = float(free) / total if total > 0 else 0.0
+        
+        # If map is mostly unknown, use smaller exploration radius (stay closer to known areas)
+        if free_pct < 0.05:  # Less than 5% free space
+            exploration_radius = 2.0  # Stay close to robot where we know there's free space
+        else:
+            exploration_radius = 5.0  # Can explore further when more is known
+        
         min_x = max(origin_x, robot_x - exploration_radius)
         max_x = min(origin_x + width, robot_x + exploration_radius)
         min_y = max(origin_y, robot_y - exploration_radius)
@@ -253,8 +264,8 @@ class AutoExploreRRT:
                 # Check distance from robot
                 distance = norm(self.robot_pose - np.array([x, y]))
                 if MIN_GOAL_DISTANCE <= distance <= MAX_GOAL_DISTANCE:
-                    # Prefer points in known free space (move_base can plan to these)
-                    # But also allow unknown space (we'll project it later)
+                    # Prefer points in known free space or near known free space (move_base can plan to these)
+                    # Points in unknown space will be projected, but prefer those near known space
                     resolution = self.map_info.resolution
                     origin_x = self.map_info.origin.position.x
                     origin_y = self.map_info.origin.position.y
@@ -265,9 +276,26 @@ class AutoExploreRRT:
                         map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
                         cell_value = map_array[grid_y, grid_x]
                         
-                        # Prefer known free space, but allow unknown (will be projected)
-                        if cell_value == FREE or (0 < cell_value < 50) or cell_value == UNKNOWN:
+                        # If in known free space, add it
+                        if cell_value == FREE or (0 < cell_value < 50):
                             candidates.append([x, y])
+                        elif cell_value == UNKNOWN:
+                            # Check if there's known free space nearby (within 5 cells = ~0.25m at 0.05m resolution)
+                            has_nearby_free = False
+                            for dx in range(-5, 6):
+                                for dy in range(-5, 6):
+                                    nx, ny = grid_x + dx, grid_y + dy
+                                    if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                                        neighbor_value = map_array[ny, nx]
+                                        if neighbor_value == FREE or (0 < neighbor_value < 50):
+                                            has_nearby_free = True
+                                            break
+                                if has_nearby_free:
+                                    break
+                            
+                            # Only add unknown space points if they have nearby known free space
+                            if has_nearby_free:
+                                candidates.append([x, y])
         
         return candidates
     
@@ -448,14 +476,10 @@ class AutoExploreRRT:
         best_x, best_y = world_x, world_y
         best_distance = float('inf')
         
-        # Search in expanding circles
+        # Search in expanding squares (check all cells, not just perimeter)
         for radius in range(1, max_search_cells + 1):
             for dx in range(-radius, radius + 1):
                 for dy in range(-radius, radius + 1):
-                    # Only check cells on the perimeter of this radius
-                    if abs(dx) != radius and abs(dy) != radius:
-                        continue
-                    
                     nx, ny = grid_x + dx, grid_y + dy
                     if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
                         neighbor_value = map_array[ny, nx]
@@ -494,13 +518,14 @@ class AutoExploreRRT:
         
         # Project goal to known free space if needed (move_base can't plan to unknown space)
         # This is critical - move_base needs known free space to plan paths
-        projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y, max_search_radius=1.5)
+        # Use larger search radius to find known free space
+        projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y, max_search_radius=3.0)
         if projected_x != world_x or projected_y != world_y:
             rospy.loginfo("Auto Explore RRT: Projected goal from (%.2f, %.2f) to (%.2f, %.2f) (moved to known free space)", 
                          world_x, world_y, projected_x, projected_y)
             world_x, world_y = projected_x, projected_y
         else:
-            # Check if original goal is in unknown space - if so, log a warning
+            # Check if original goal is in unknown space - if so, reject it (move_base can't plan to unknown space)
             if self.map_data is not None and self.map_info is not None:
                 resolution = self.map_info.resolution
                 origin_x = self.map_info.origin.position.x
@@ -511,8 +536,10 @@ class AutoExploreRRT:
                     map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
                     cell_value = map_array[grid_y, grid_x]
                     if cell_value == UNKNOWN:
-                        rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is in unknown space and couldn't be projected - move_base may not be able to plan", 
+                        rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is in unknown space and couldn't be projected to known free space within 3m - rejecting goal", 
                                     world_x, world_y)
+                        self.assigned_point = None
+                        return  # Don't send goal if we can't project it to known free space
         
         # Create goal (exactly like ros_autonomous_slam robot.sendGoal())
         goal = MoveBaseGoal()
