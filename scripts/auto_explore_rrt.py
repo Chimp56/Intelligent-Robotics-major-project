@@ -354,47 +354,44 @@ class AutoExploreRRT:
                           world_x, world_y, cell_value)
             return False
         
-        # For exploration, we allow goals in unknown space, but prefer those with some known free space nearby
-        # Check 5x5 area around goal for free/unknown space
-        free_count = 0
-        unknown_count = 0
+        # For exploration, we're very lenient - allow goals in unknown space
+        # Check 3x3 area around goal to ensure it's not completely surrounded by obstacles
         occupied_count = 0
+        free_count = 0
         
-        for dx in range(-2, 3):
-            for dy in range(-2, 3):
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
                 nx, ny = grid_x + dx, grid_y + dy
                 if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
                     neighbor_value = map_array[ny, nx]
                     if neighbor_value == FREE or (0 < neighbor_value < 50):
                         free_count += 1
-                    elif neighbor_value == UNKNOWN:
-                        unknown_count += 1
                     elif neighbor_value >= COSTMAP_CLEARING_THRESHOLD:
                         occupied_count += 1
         
-        # Allow goal if:
-        # 1. It's in free space with at least 2 free neighbors, OR
-        # 2. It's in unknown space with at least 1 free neighbor (for navigation), OR
-        # 3. It's in unknown space and not completely surrounded by obstacles
+        # Very lenient validation for exploration:
+        # 1. If in free space - allow it (move_base can handle it)
+        # 2. If in unknown space - allow it as long as not completely surrounded by obstacles
+        #    (we're exploring, so unknown space is what we want to explore!)
         
         if cell_value == FREE or (0 < cell_value < 50):
-            # In free space - need some free neighbors
-            if free_count >= 2:
-                return True
-            else:
-                rospy.logdebug("Auto Explore RRT: Goal at (%.2f, %.2f) in free space but only %d free neighbors", 
-                             world_x, world_y, free_count)
-                return False
+            # In free space - always allow (move_base can navigate to free space)
+            rospy.logdebug("Auto Explore RRT: Goal at (%.2f, %.2f) in free space - VALID", world_x, world_y)
+            return True
         elif cell_value == UNKNOWN:
-            # In unknown space - need at least 1 free neighbor for navigation, and not surrounded by obstacles
-            if free_count >= 1 and occupied_count < 8:
+            # In unknown space - allow if not completely surrounded by obstacles
+            # Allow if less than 8 occupied neighbors (not completely blocked)
+            if occupied_count < 8:
+                rospy.logdebug("Auto Explore RRT: Goal at (%.2f, %.2f) in unknown space with %d occupied neighbors - VALID", 
+                             world_x, world_y, occupied_count)
                 return True
             else:
-                rospy.logdebug("Auto Explore RRT: Goal at (%.2f, %.2f) in unknown space: %d free, %d unknown, %d occupied neighbors", 
-                             world_x, world_y, free_count, unknown_count, occupied_count)
+                rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) in unknown space but surrounded by obstacles (%d occupied)", 
+                            world_x, world_y, occupied_count)
                 return False
         
         # Should not reach here, but reject by default
+        rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) has unexpected cell value: %d", world_x, world_y, cell_value)
         return False
     
     def _send_goal(self, waypoint):
@@ -411,9 +408,20 @@ class AutoExploreRRT:
         
         world_x, world_y = waypoint
         
-        # Validate goal before sending
+        # Validate goal before sending (very lenient for exploration)
         if not self._is_goal_valid(world_x, world_y):
             rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is invalid, skipping", world_x, world_y)
+            # Log map info for debugging
+            if self.map_info is not None:
+                resolution = self.map_info.resolution
+                origin_x = self.map_info.origin.position.x
+                origin_y = self.map_info.origin.position.y
+                grid_x = int((world_x - origin_x) / resolution)
+                grid_y = int((world_y - origin_y) / resolution)
+                if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+                    map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+                    cell_value = map_array[grid_y, grid_x]
+                    rospy.logwarn("Auto Explore RRT: Goal cell value: %d (grid: %d, %d)", cell_value, grid_x, grid_y)
             self.assigned_point = None
             return
         
