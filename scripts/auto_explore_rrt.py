@@ -40,11 +40,13 @@ COSTMAP_CLEARING_THRESHOLD = 70  # Threshold for costmap clearing
 # Exploration parameters
 RATE_HZ = 10.0  # Hz - main loop rate (matching assigner.py)
 DELAY_AFTER_ASSIGNMENT = 0.5  # seconds - delay after assigning goal
-MIN_GOAL_DISTANCE = 0.5  # Minimum distance from robot to goal (meters)
-MAX_GOAL_DISTANCE = 1.5  # Maximum distance from robot to goal (meters) - reduced for better reachability
 MIN_GOAL_DISTANCE = 0.3  # Minimum distance from robot to goal (meters)
+MAX_GOAL_DISTANCE = 1.5  # Maximum distance from robot to goal (meters) - reduced for better reachability
 GOAL_TIMEOUT = 30.0  # seconds - timeout for reaching a goal
 NUM_CANDIDATE_SAMPLES = 30  # Number of candidate points to sample per iteration
+
+# Navigation interface: 'actionlib' (move_base) or 'simple' (move_base_simple/goal topic)
+USE_MOVE_BASE_SIMPLE = False  # Set to True to use simpler topic-based interface
 
 
 class AutoExploreRRT:
@@ -75,6 +77,8 @@ class AutoExploreRRT:
         
         # Move base action client for navigation
         self.move_base_client = None
+        self.move_base_simple_pub = None  # Publisher for move_base_simple/goal topic
+        self.use_simple_interface = USE_MOVE_BASE_SIMPLE
         self.assigned_point = None  # Currently assigned exploration point
         self.goal_start_time = None
         
@@ -108,8 +112,11 @@ class AutoExploreRRT:
         self.odom_sub = rospy.Subscriber('/odom', Odometry, self._cb_odom)
         self.laser_sub = rospy.Subscriber('/scan', LaserScan, self._cb_laser)
         
-        # Initialize move_base client
-        self._init_move_base_client()
+        # Initialize move_base client (actionlib or simple topic)
+        if self.use_simple_interface:
+            self._init_move_base_simple()
+        else:
+            self._init_move_base_client()
         
         rospy.loginfo("Auto Explore RRT: Initialization complete")
     
@@ -123,6 +130,17 @@ class AutoExploreRRT:
         except Exception as e:
             rospy.logwarn("Auto Explore RRT: Failed to connect to move_base: %s", str(e))
             self.move_base_client = None
+    
+    def _init_move_base_simple(self):
+        """Initialize the move_base_simple/goal topic publisher (simpler interface)"""
+        try:
+            from geometry_msgs.msg import PoseStamped
+            self.move_base_simple_pub = rospy.Publisher('/move_base_simple/goal', PoseStamped, queue_size=1)
+            rospy.loginfo("Auto Explore RRT: Using move_base_simple/goal topic (simpler interface)")
+            rospy.sleep(0.5)  # Give publisher time to connect
+        except Exception as e:
+            rospy.logwarn("Auto Explore RRT: Failed to initialize move_base_simple: %s", str(e))
+            self.move_base_simple_pub = None
     
     def _cb_state(self, msg):
         """Callback for state changes"""
@@ -145,9 +163,16 @@ class AutoExploreRRT:
                     self.wander_start_time = None
                     self.wander_start_position = None
                     self.wander_stuck_count = 0
+                    # Reset direct navigation state
+                    self.use_direct_navigation = False
+                    self.direct_nav_goal = None
+                    self.move_base_failure_count = 0
+                    # Stop any current motion
+                    twist = Twist()
+                    self.cmd_vel_pub.publish(twist)
                     if self.move_base_client is not None:
                         self.move_base_client.cancel_all_goals()
-                    rospy.loginfo("Auto Explore RRT: Starting continuous exploration")
+                    rospy.loginfo("Auto Explore RRT: Starting continuous exploration (reset all navigation state)")
                 else:
                     self.exploring = False
                     if self.move_base_client is not None:
@@ -544,16 +569,22 @@ class AutoExploreRRT:
     
     def _send_goal(self, waypoint):
         """
-        Send goal to move_base.
+        Send goal to move_base (either via actionlib or simple topic).
         Based on ros_autonomous_slam/scripts/functions.py robot.sendGoal()
         Projects goals from unknown space to known free space (move_base needs known space to plan)
         
         Args:
             waypoint: [x, y] tuple
         """
-        if self.move_base_client is None:
-            rospy.logwarn("Auto Explore RRT: move_base client not available")
-            return
+        # Check if we have a valid interface
+        if self.use_simple_interface:
+            if self.move_base_simple_pub is None:
+                rospy.logwarn("Auto Explore RRT: move_base_simple publisher not available")
+                return
+        else:
+            if self.move_base_client is None:
+                rospy.logwarn("Auto Explore RRT: move_base client not available")
+                return
         
         world_x, world_y = waypoint
         
@@ -609,49 +640,62 @@ class AutoExploreRRT:
             self.assigned_point = None
             return
         
-        # Create goal (exactly like ros_autonomous_slam robot.sendGoal())
-        goal = MoveBaseGoal()
-        goal.target_pose.header.frame_id = "map"
-        goal.target_pose.header.stamp = rospy.Time(0)  # Use Time(0) to avoid TF extrapolation errors
-        goal.target_pose.pose.position.x = world_x
-        goal.target_pose.pose.position.y = world_y
-        goal.target_pose.pose.position.z = 0.0
-        goal.target_pose.pose.orientation.w = 1.0
+        # Create goal pose
+        from geometry_msgs.msg import PoseStamped
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = "map"
+        goal_pose.header.stamp = rospy.Time(0)  # Use Time(0) to avoid TF extrapolation errors
+        goal_pose.pose.position.x = world_x
+        goal_pose.pose.position.y = world_y
+        goal_pose.pose.position.z = 0.0
+        goal_pose.pose.orientation.w = 1.0
         
-        # Send goal
+        # Send goal using appropriate interface
         try:
-            self.move_base_client.send_goal(goal)
-            self.assigned_point = np.array([world_x, world_y])
-            self.goal_start_time = rospy.Time.now()
-            self.last_robot_position = self.robot_pose.copy() if self.robot_pose is not None else None
-            self.stuck_check_time = rospy.Time.now()
-            
-            rospy.loginfo("Auto Explore RRT: Assigned goal (%.2f, %.2f)", world_x, world_y)
-            
-            # Wait a bit to see if goal was accepted (like ros_autonomous_slam)
-            rospy.sleep(0.1)
-            state = self.move_base_client.get_state()
-            
-            if state == GoalStatus.REJECTED:
-                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base (failure count: %d)", self.move_base_failure_count + 1)
-                self.move_base_failure_count += 1
-                self.assigned_point = None
-                self.goal_start_time = None
+            if self.use_simple_interface:
+                # Use simple topic interface (more reliable, no feedback)
+                self.move_base_simple_pub.publish(goal_pose)
+                rospy.loginfo("Auto Explore RRT: Published goal to move_base_simple/goal (%.2f, %.2f)", world_x, world_y)
+                self.assigned_point = np.array([world_x, world_y])
+                self.goal_start_time = rospy.Time.now()
+                self.last_robot_position = self.robot_pose.copy() if self.robot_pose is not None else None
+                self.stuck_check_time = rospy.Time.now()
+            else:
+                # Use actionlib interface (with feedback)
+                goal = MoveBaseGoal()
+                goal.target_pose = goal_pose
+                self.move_base_client.send_goal(goal)
+                self.assigned_point = np.array([world_x, world_y])
+                self.goal_start_time = rospy.Time.now()
+                self.last_robot_position = self.robot_pose.copy() if self.robot_pose is not None else None
+                self.stuck_check_time = rospy.Time.now()
                 
-                # After 2 consecutive failures, switch to direct navigation (reduced from 3 for faster fallback)
-                if self.move_base_failure_count >= 2:
-                    rospy.logwarn("Auto Explore RRT: move_base failed %d times consecutively, switching to direct navigation", 
-                                self.move_base_failure_count)
-                    self.use_direct_navigation = True
-                    # Cancel any pending goals
-                    try:
-                        self.move_base_client.cancel_all_goals()
-                    except:
-                        pass
-            elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
-                rospy.loginfo("Auto Explore RRT: Goal accepted")
-                self.move_base_failure_count = 0  # Reset on success
-                self.use_direct_navigation = False  # Reset direct navigation flag
+                rospy.loginfo("Auto Explore RRT: Assigned goal (%.2f, %.2f)", world_x, world_y)
+                
+                # Wait a bit to see if goal was accepted (like ros_autonomous_slam)
+                rospy.sleep(0.1)
+                state = self.move_base_client.get_state()
+                
+                if state == GoalStatus.REJECTED:
+                    rospy.logwarn("Auto Explore RRT: Goal rejected by move_base (failure count: %d)", self.move_base_failure_count + 1)
+                    self.move_base_failure_count += 1
+                    self.assigned_point = None
+                    self.goal_start_time = None
+                    
+                    # After 2 consecutive failures, switch to direct navigation (reduced from 3 for faster fallback)
+                    if self.move_base_failure_count >= 2:
+                        rospy.logwarn("Auto Explore RRT: move_base failed %d times consecutively, switching to direct navigation", 
+                                    self.move_base_failure_count)
+                        self.use_direct_navigation = True
+                        # Cancel any pending goals
+                        try:
+                            self.move_base_client.cancel_all_goals()
+                        except:
+                            pass
+                elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
+                    rospy.loginfo("Auto Explore RRT: Goal accepted")
+                    self.move_base_failure_count = 0  # Reset on success
+                    self.use_direct_navigation = False  # Reset direct navigation flag
         except Exception as e:
             rospy.logerr("Auto Explore RRT: Failed to send goal: %s", str(e))
             import traceback
@@ -660,8 +704,8 @@ class AutoExploreRRT:
             self.goal_start_time = None
     
     def _check_goal_timeout(self):
-        """Check if current goal has timed out or robot is stuck"""
-        if self.goal_start_time is not None and self.move_base_client is not None:
+        """Check if current goal has timed out or robot is stuck (only for actionlib interface)"""
+        if self.goal_start_time is not None and self.move_base_client is not None and not self.use_simple_interface:
             try:
                 state = self.move_base_client.get_state()
                 if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
@@ -755,9 +799,27 @@ class AutoExploreRRT:
             rospy.sleep(DELAY_AFTER_ASSIGNMENT)
             return
         
-        # If using direct navigation, continue navigating
-        if self.use_direct_navigation and self.direct_nav_goal is not None:
-            self._navigate_directly(self.direct_nav_goal.tolist())
+        # If using direct navigation, continue navigating (only if we have a valid goal)
+        if self.use_direct_navigation:
+            if self.direct_nav_goal is not None and self.robot_pose is not None:
+                # Check if goal is still valid (not too far away)
+                distance = norm(self.robot_pose - self.direct_nav_goal)
+                if distance > MAX_GOAL_DISTANCE * 2:  # Goal is too far, cancel it
+                    rospy.logwarn("Auto Explore RRT: Direct nav goal too far (%.2f m), canceling", distance)
+                    self.direct_nav_goal = None
+                    self.assigned_point = None
+                    self.use_direct_navigation = False
+                    twist = Twist()
+                    self.cmd_vel_pub.publish(twist)
+                else:
+                    self._navigate_directly(self.direct_nav_goal.tolist())
+            else:
+                # No valid goal, exit direct navigation
+                rospy.loginfo("Auto Explore RRT: Direct nav has no valid goal, exiting direct navigation mode")
+                self.use_direct_navigation = False
+                self.direct_nav_goal = None
+                twist = Twist()
+                self.cmd_vel_pub.publish(twist)
             return
         
         # Check if we should do initial rotation when starting (do this first)
@@ -1173,19 +1235,22 @@ class AutoExploreRRT:
             return
         
         # Turn toward goal if not aligned
-        if abs(angle_diff) > 0.2:  # ~11 degrees
+        if abs(angle_diff) > 0.15:  # ~8.6 degrees (reduced threshold for faster alignment)
             twist = Twist()
             twist.linear.x = 0.0
-            twist.angular.z = 0.4 if angle_diff > 0 else -0.4
+            # Use proportional control for smoother turning
+            angular_speed = min(0.6, abs(angle_diff) * 1.5)  # Faster turn for larger angles
+            twist.angular.z = angular_speed if angle_diff > 0 else -angular_speed
             self.cmd_vel_pub.publish(twist)
-            rospy.loginfo_throttle(2, "Auto Explore RRT: Direct nav - turning toward goal (angle diff: %.2f rad)", angle_diff)
+            rospy.loginfo_throttle(2, "Auto Explore RRT: Direct nav - turning toward goal (angle diff: %.2f rad, speed: %.2f)", 
+                                 angle_diff, angular_speed)
         else:
             # Move forward toward goal
             twist = Twist()
             # Slow down as we approach goal
-            speed = min(0.2, distance * 0.3)
+            speed = min(0.25, distance * 0.4)  # Slightly faster
             twist.linear.x = speed
-            twist.angular.z = 0.1 * angle_diff  # Small correction
+            twist.angular.z = 0.2 * angle_diff  # Proportional correction
             self.cmd_vel_pub.publish(twist)
             rospy.loginfo_throttle(2, "Auto Explore RRT: Direct nav - moving toward goal (distance: %.2f m, speed: %.2f)", 
                                  distance, speed)
