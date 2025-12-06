@@ -47,6 +47,30 @@ rosservice call /tour_guide/start_mapping
 rosservice call /tour_guide/stop_mapping
 ```
 
+## Exploration Algorithms
+
+The tour guide supports two exploration algorithms:
+
+### Frontier-based Exploration (Default)
+Uses frontier detection to explore boundaries between known and unknown space. This is the default algorithm.
+
+```bash
+roslaunch tour_guide controller.launch exploration_algorithm:=frontier
+```
+
+### RRT-based Exploration
+Uses Rapidly Exploring Random Tree (RRT) algorithm to randomly sample waypoints in unexplored areas. Based on the approach from [ros_autonomous_slam](https://github.com/fazildgr8/ros_autonomous_slam).
+
+```bash
+roslaunch tour_guide controller.launch exploration_algorithm:=rrt
+```
+
+The RRT algorithm:
+- Randomly samples waypoints in the exploration region (automatically set from map bounds)
+- Prefers waypoints in unknown space with nearby free space for navigation
+- Avoids revisiting recently visited areas
+- Uses move_base for navigation to waypoints
+
 ## Help
 
 

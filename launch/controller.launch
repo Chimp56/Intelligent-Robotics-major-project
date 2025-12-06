@@ -54,12 +54,26 @@
   <!-- Move base for navigation -->
   <include file="$(find turtlebot_navigation)/launch/includes/move_base.launch.xml"/>
 
+  <!-- Exploration algorithm selection: frontier or rrt -->
+  <arg name="exploration_algorithm" default="frontier" doc="Exploration algorithm: frontier or rrt"/>
+  
   <node pkg="tour_guide" type="controller.py" name="controller" output="screen">
   </node>
   <node pkg="tour_guide" type="test_circle.py" name="test_circle" output="screen">
   </node>
-  <node pkg="tour_guide" type="auto_explore.py" name="auto_explore" output="screen">
-  </node>
+  
+  <!-- Frontier-based exploration (default) -->
+  <group if="$(eval exploration_algorithm == 'frontier')">
+    <node pkg="tour_guide" type="auto_explore.py" name="auto_explore" output="screen">
+    </node>
+  </group>
+  
+  <!-- RRT-based exploration -->
+  <group if="$(eval exploration_algorithm == 'rrt')">
+    <node pkg="tour_guide" type="auto_explore_rrt.py" name="auto_explore_rrt" output="screen">
+    </node>
+  </group>
+  
   <node pkg="tour_guide" type="position_logger.py" name="position_logger" output="screen">
   </node>
 
