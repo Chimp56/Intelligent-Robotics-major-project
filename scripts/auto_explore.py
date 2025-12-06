@@ -663,6 +663,75 @@ class AutoExplore:
         # Need at least 5 known free cells nearby
         return known_count >= 5
 
+    def _project_goal_to_known_space(self, world_x, world_y, max_search_radius=1.0):
+        """
+        If the goal is in unknown space, project it to the nearest known free space.
+        move_base often rejects goals in unknown space.
+        
+        Args:
+            world_x, world_y: Original goal coordinates
+            max_search_radius: Maximum distance to search for known free space (meters)
+        
+        Returns:
+            (projected_x, projected_y) - either the original coordinates if already in known space,
+            or the nearest known free space coordinates
+        """
+        if self.map_data is None or self.map_info is None:
+            return world_x, world_y  # Can't project without map
+        
+        # Convert to grid coordinates
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        # Check bounds
+        if grid_x < 0 or grid_x >= self.map_info.width or grid_y < 0 or grid_y >= self.map_info.height:
+            return world_x, world_y  # Out of bounds, can't project
+        
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        cell_value = map_array[grid_y, grid_x]
+        
+        # If goal is already in known free space, return as-is
+        if cell_value == FREE or (0 < cell_value < FRONTIER_THRESHOLD):
+            return world_x, world_y
+        
+        # Goal is in unknown or occupied space - search for nearest known free space
+        max_search_cells = int(max_search_radius / resolution)
+        best_x, best_y = world_x, world_y
+        best_distance = float('inf')
+        
+        # Search in expanding circles
+        for radius in range(1, max_search_cells + 1):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    # Only check cells on the perimeter of this radius
+                    if abs(dx) != radius and abs(dy) != radius:
+                        continue
+                    
+                    nx, ny = grid_x + dx, grid_y + dy
+                    if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                        neighbor_value = map_array[ny, nx]
+                        # Check if this is known free space
+                        if neighbor_value == FREE or (0 < neighbor_value < FRONTIER_THRESHOLD):
+                            # Convert back to world coordinates
+                            candidate_x = nx * resolution + origin_x
+                            candidate_y = ny * resolution + origin_y
+                            distance = math.sqrt((candidate_x - world_x)**2 + (candidate_y - world_y)**2)
+                            
+                            if distance < best_distance:
+                                best_distance = distance
+                                best_x, best_y = candidate_x, candidate_y
+            
+            # If we found a candidate, return it (don't search further)
+            if best_distance < float('inf'):
+                return best_x, best_y
+        
+        # No known free space found within max radius - return original
+        return world_x, world_y
+
     def _navigate_to_frontier(self, frontier):
         """
         Navigate to a frontier using move_base
@@ -680,6 +749,14 @@ class AutoExplore:
             return
         
         world_x, world_y = frontier
+        
+        # If goal is in unknown space, try to project it to nearby known free space
+        # move_base often rejects goals in unknown space
+        projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y)
+        if projected_x != world_x or projected_y != world_y:
+            rospy.loginfo("Auto Explore: Projected goal from (%.2f, %.2f) to (%.2f, %.2f) (moved to known free space)", 
+                         world_x, world_y, projected_x, projected_y)
+            world_x, world_y = projected_x, projected_y
         
         # Validate goal is valid for navigation
         if not self._is_goal_valid(world_x, world_y):
@@ -737,6 +814,30 @@ class AutoExplore:
             
             # Check if goal was immediately rejected
             if state == GoalStatus.REJECTED:
+                # Get more details about why it was rejected
+                try:
+                    # Check if goal is in unknown space
+                    if self.map_data is not None and self.map_info is not None:
+                        resolution = self.map_info.resolution
+                        origin_x = self.map_info.origin.position.x
+                        origin_y = self.map_info.origin.position.y
+                        grid_x = int((world_x - origin_x) / resolution)
+                        grid_y = int((world_y - origin_y) / resolution)
+                        if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+                            map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+                            cell_value = map_array[grid_y, grid_x]
+                            if cell_value == UNKNOWN:
+                                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) rejected - likely in unknown space (value: %d)", 
+                                           world_x, world_y, cell_value)
+                            elif cell_value >= FRONTIER_THRESHOLD:
+                                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) rejected - in occupied space (value: %d)", 
+                                           world_x, world_y, cell_value)
+                            else:
+                                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) rejected - may be unreachable or in costmap obstacle", 
+                                           world_x, world_y)
+                except Exception as e:
+                    rospy.logwarn("Auto Explore: Could not diagnose rejection reason: %s", str(e))
+                
                 rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) was immediately rejected by move_base. Marking as visited.", 
                            world_x, world_y)
                 # Mark as visited to avoid retrying (use same precision as selection)
