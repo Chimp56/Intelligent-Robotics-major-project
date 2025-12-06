@@ -129,6 +129,14 @@ class AutoExploreRRT:
                 if new_state == RobotState.MAPPING:
                     self.exploring = True
                     self.assigned_point = None
+                    # Reset initial rotation when starting mapping
+                    self.initial_rotation_done = False
+                    self.initial_rotation_start_time = None
+                    self.initial_rotation_accumulated = 0.0
+                    self.last_odom_yaw = None
+                    # Reset wander mode
+                    self.wander_mode = False
+                    self.wander_start_time = None
                     if self.move_base_client is not None:
                         self.move_base_client.cancel_all_goals()
                     rospy.loginfo("Auto Explore RRT: Starting continuous exploration")
@@ -677,10 +685,14 @@ class AutoExploreRRT:
         Based on ros_autonomous_slam/scripts/assigner.py main loop.
         """
         if not self.exploring or self.state != RobotState.MAPPING:
+            rospy.logdebug_throttle(5.0, "Auto Explore RRT: Not exploring (exploring=%s, state=%s)", 
+                                   self.exploring, self.state.value if self.state else "None")
             return
         
         # Wait for map and robot pose
         if self.map_data is None or self.map_info is None or self.robot_pose is None:
+            rospy.logdebug_throttle(5.0, "Auto Explore RRT: Waiting for map/pose (map=%s, info=%s, pose=%s)", 
+                                   self.map_data is not None, self.map_info is not None, self.robot_pose is not None)
             return
         
         # Check for goal timeout
@@ -690,11 +702,13 @@ class AutoExploreRRT:
         
         # Check if we should do initial rotation when starting (do this first)
         if not self.initial_rotation_done:
+            rospy.loginfo("Auto Explore RRT: Performing initial rotation...")
             self._perform_initial_rotation()
             return
         
         # Check if we're in wander mode
         if self.wander_mode:
+            rospy.loginfo_throttle(2, "Auto Explore RRT: In wander mode...")
             self._perform_wander_exploration()
             return
         
@@ -796,27 +810,29 @@ class AutoExploreRRT:
         # Target: 2 full rotations = 4π radians
         self.initial_rotation_target = 4 * math.pi
         
-        # Get current yaw from odometry
+        # Get current yaw from odometry and track progress
         if self.robot_yaw is not None:
             current_yaw = self.robot_yaw
             
             # Initialize last yaw on first call
             if self.last_odom_yaw is None:
                 self.last_odom_yaw = current_yaw
-                return
-            
-            # Calculate accumulated rotation (handle wrap-around)
-            yaw_diff = current_yaw - self.last_odom_yaw
-            if yaw_diff > math.pi:
-                yaw_diff -= 2 * math.pi
-            elif yaw_diff < -math.pi:
-                yaw_diff += 2 * math.pi
-            
-            self.initial_rotation_accumulated += abs(yaw_diff)
-            self.last_odom_yaw = current_yaw
+            else:
+                # Calculate accumulated rotation (handle wrap-around)
+                yaw_diff = current_yaw - self.last_odom_yaw
+                if yaw_diff > math.pi:
+                    yaw_diff -= 2 * math.pi
+                elif yaw_diff < -math.pi:
+                    yaw_diff += 2 * math.pi
+                
+                self.initial_rotation_accumulated += abs(yaw_diff)
+                self.last_odom_yaw = current_yaw
         
-        # Check if rotation is complete
-        if self.initial_rotation_accumulated >= self.initial_rotation_target:
+        # Check if rotation is complete (use time-based fallback if yaw tracking not available)
+        elapsed_time = (rospy.Time.now() - self.initial_rotation_start_time).to_sec()
+        rotation_time_needed = self.initial_rotation_target / 0.4  # 0.4 rad/s rotation speed
+        
+        if self.robot_yaw is not None and self.initial_rotation_accumulated >= self.initial_rotation_target:
             rospy.loginfo("Auto Explore RRT: Initial rotation complete (%.1f degrees)", 
                          math.degrees(self.initial_rotation_accumulated))
             self.initial_rotation_done = True
@@ -824,18 +840,29 @@ class AutoExploreRRT:
             self.cmd_vel_pub.publish(twist)
             rospy.sleep(0.5)
             return
+        elif elapsed_time >= rotation_time_needed:
+            # Time-based fallback if yaw tracking isn't working
+            rospy.loginfo("Auto Explore RRT: Initial rotation complete (time-based, %.1f seconds)", elapsed_time)
+            self.initial_rotation_done = True
+            twist = Twist()  # Stop
+            self.cmd_vel_pub.publish(twist)
+            rospy.sleep(0.5)
+            return
         
-        # Rotate counter-clockwise at moderate speed
+        # Rotate counter-clockwise at moderate speed (ALWAYS publish, even if tracking not ready)
         twist = Twist()
         twist.linear.x = 0.0
         twist.angular.z = 0.4  # 0.4 rad/s rotation speed
         self.cmd_vel_pub.publish(twist)
+        rospy.loginfo_throttle(1, "Auto Explore RRT: Publishing rotation command (angular.z=%.2f)", twist.angular.z)
         
         # Log progress
         if self.last_odom_yaw is not None:
             progress_pct = (self.initial_rotation_accumulated / self.initial_rotation_target) * 100
             rospy.loginfo_throttle(2, "Auto Explore RRT: Initial rotation progress: %.1f%% (%.1f degrees / 720 degrees)", 
                                   progress_pct, math.degrees(self.initial_rotation_accumulated))
+        else:
+            rospy.loginfo_throttle(2, "Auto Explore RRT: Initial rotation in progress (waiting for odometry)...")
     
     def _perform_wander_exploration(self):
         """
