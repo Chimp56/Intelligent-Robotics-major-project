@@ -807,7 +807,7 @@ class AutoExploreRRT:
             self.initial_rotation_start_time = rospy.Time.now()
             rospy.loginfo("Auto Explore RRT: Starting initial 2-revolution scan...")
         
-        # Target: 2 full rotations = 4π radians
+        # Target: 2 full rotations = 4pi radians
         self.initial_rotation_target = 4 * math.pi
         
         # Get current yaw from odometry and track progress
