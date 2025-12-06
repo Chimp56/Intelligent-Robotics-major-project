@@ -1,0 +1,21 @@
+global_costmap:
+  global_frame: map
+  robot_base_frame: base_footprint
+  update_frequency: 1.0
+  publish_frequency: 0.5
+  static_map: true
+  rolling_window: false
+  plugins:
+    - {name: static_layer, type: "costmap_2d::StaticLayer"}
+    - {name: obstacles, type: "costmap_2d::ObstacleLayer"}
+    - {name: inflation, type: "costmap_2d::InflationLayer"}
+  
+  obstacles:
+    observation_sources: scan
+    scan: {sensor_frame: camera_depth_frame, data_type: LaserScan, topic: scan, marking: true, clearing: true}
+    track_unknown_space: true
+  
+  inflation:
+    inflation_radius: 0.3  # Reduced from default (0.55) to allow closer approach
+    cost_scaling_factor: 5.0  # Reduced from default (10.0) for less aggressive inflation
+

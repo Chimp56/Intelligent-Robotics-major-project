@@ -79,7 +79,7 @@ class DStarNode(object):
         self.goal=None; self.odom=None
         self.tf = tf.TransformListener()
         self.pub_path = rospy.Publisher("/dstar/path", Path, queue_size=1, latch=True)
-        self.pub_wp   = rospy.Publisher("/navigation_controller/waypoints", PoseArray, queue_size=1)
+        self.pub_wp   = rospy.Publisher("/controller/waypoints", PoseArray, queue_size=1)
         rospy.Subscriber("/map",  OccupancyGrid, self.on_map)
         rospy.Subscriber("/odom", Odometry,       self.on_odom)
         rospy.Subscriber("/task_planner/next_goal", PoseStamped, self.on_goal)
