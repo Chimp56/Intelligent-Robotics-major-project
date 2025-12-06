@@ -80,6 +80,8 @@ class AutoExploreRRT:
         # Exploration state
         self.exploring = False
         self.candidate_points = []  # List of candidate exploration points
+        self.last_robot_position = None  # Track robot position for stuck detection
+        self.stuck_check_time = None
         
         # Publishers and subscribers
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
@@ -315,6 +317,57 @@ class AutoExploreRRT:
             # Send goal to move_base
             self._send_goal(best_waypoint)
     
+    def _is_goal_valid(self, world_x, world_y):
+        """
+        Validate that a goal is valid for navigation.
+        
+        Args:
+            world_x, world_y: World coordinates
+        
+        Returns:
+            True if goal is valid, False otherwise
+        """
+        if self.map_data is None or self.map_info is None:
+            return False
+        
+        # Create a temporary OccupancyGrid-like object
+        class MapData:
+            def __init__(self, data, info):
+                self.data = data
+                self.info = info
+        
+        map_data_obj = MapData(self.map_data, self.map_info)
+        
+        # Check if point is valid (not in occupied space)
+        if not is_valid_point(map_data_obj, [world_x, world_y], threshold=COSTMAP_CLEARING_THRESHOLD):
+            return False
+        
+        # Check if goal has nearby free space for navigation
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        # Check bounds
+        if grid_x < 0 or grid_x >= self.map_info.width or grid_y < 0 or grid_y >= self.map_info.height:
+            return False
+        
+        # Check 3x3 area around goal for free space
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        free_count = 0
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                nx, ny = grid_x + dx, grid_y + dy
+                if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                    cell_value = map_array[ny, nx]
+                    if cell_value == FREE or (0 < cell_value < 50):
+                        free_count += 1
+        
+        # Need at least 3 free cells nearby
+        return free_count >= 3
+    
     def _send_goal(self, waypoint):
         """
         Send goal to move_base.
@@ -328,6 +381,12 @@ class AutoExploreRRT:
             return
         
         world_x, world_y = waypoint
+        
+        # Validate goal before sending
+        if not self._is_goal_valid(world_x, world_y):
+            rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is invalid, skipping", world_x, world_y)
+            self.assigned_point = None
+            return
         
         # Wait for transform to be available
         try:
@@ -351,34 +410,111 @@ class AutoExploreRRT:
             self.move_base_client.send_goal(goal)
             self.assigned_point = np.array([world_x, world_y])
             self.goal_start_time = rospy.Time.now()
+            self.last_robot_position = self.robot_pose.copy() if self.robot_pose is not None else None
+            self.stuck_check_time = rospy.Time.now()
             
             rospy.loginfo("Auto Explore RRT: Assigned goal (%.2f, %.2f)", world_x, world_y)
             
             # Wait a bit to see if goal was accepted
-            rospy.sleep(0.1)
+            rospy.sleep(0.5)
             state = self.move_base_client.get_state()
+            
+            # Log goal state with descriptive names
+            state_names = {
+                GoalStatus.PENDING: "PENDING",
+                GoalStatus.ACTIVE: "ACTIVE",
+                GoalStatus.PREEMPTED: "PREEMPTED",
+                GoalStatus.SUCCEEDED: "SUCCEEDED",
+                GoalStatus.ABORTED: "ABORTED",
+                GoalStatus.REJECTED: "REJECTED",
+                GoalStatus.PREEMPTING: "PREEMPTING",
+                GoalStatus.RECALLING: "RECALLING",
+                GoalStatus.RECALLED: "RECALLED",
+                GoalStatus.LOST: "LOST"
+            }
+            state_name = state_names.get(state, "UNKNOWN")
+            rospy.loginfo("Auto Explore RRT: Goal state after send: %d (%s)", state, state_name)
+            
             if state == GoalStatus.REJECTED:
-                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base")
+                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base - may be in invalid location")
                 self.assigned_point = None
+                self.goal_start_time = None
+            elif state in [GoalStatus.ABORTED, GoalStatus.LOST]:
+                rospy.logwarn("Auto Explore RRT: Goal failed with status %d (%s)", state, state_name)
+                self.assigned_point = None
+                self.goal_start_time = None
+            elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
+                rospy.loginfo("Auto Explore RRT: Goal accepted, robot should start moving")
         except Exception as e:
             rospy.logerr("Auto Explore RRT: Failed to send goal: %s", str(e))
+            import traceback
+            rospy.logerr(traceback.format_exc())
             self.assigned_point = None
+            self.goal_start_time = None
     
     def _check_goal_timeout(self):
-        """Check if current goal has timed out"""
+        """Check if current goal has timed out or robot is stuck"""
         if self.goal_start_time is not None and self.move_base_client is not None:
             try:
                 state = self.move_base_client.get_state()
                 if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                     elapsed = (rospy.Time.now() - self.goal_start_time).to_sec()
+                    
+                    # Check if robot is stuck (not moving)
+                    if self.robot_pose is not None:
+                        if self.last_robot_position is None:
+                            self.last_robot_position = self.robot_pose.copy()
+                            self.stuck_check_time = rospy.Time.now()
+                        else:
+                            distance_moved = norm(self.robot_pose - self.last_robot_position)
+                            stuck_elapsed = (rospy.Time.now() - self.stuck_check_time).to_sec()
+                            
+                            # If robot moved, update position
+                            if distance_moved > 0.1:  # Moved more than 10cm
+                                self.last_robot_position = self.robot_pose.copy()
+                                self.stuck_check_time = rospy.Time.now()
+                            elif stuck_elapsed > 10.0:  # Stuck for 10 seconds
+                                rospy.logwarn("Auto Explore RRT: Robot appears stuck (moved %.3f m in %.1f s), cancelling goal", 
+                                            distance_moved, stuck_elapsed)
+                                self.move_base_client.cancel_goal()
+                                self.assigned_point = None
+                                self.goal_start_time = None
+                                self.last_robot_position = None
+                                self.stuck_check_time = None
+                                return True
+                    
+                    # Log progress periodically
+                    if int(elapsed) % 5 == 0 and elapsed > 0:
+                        rospy.loginfo("Auto Explore RRT: Goal still active after %.1f seconds (state: %d)", elapsed, state)
+                    
                     if elapsed > GOAL_TIMEOUT:
                         rospy.logwarn("Auto Explore RRT: Goal timeout after %.1f seconds, cancelling", elapsed)
                         self.move_base_client.cancel_goal()
                         self.assigned_point = None
                         self.goal_start_time = None
+                        self.last_robot_position = None
+                        self.stuck_check_time = None
                         return True
-            except:
-                pass
+                elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                    # Goal completed or failed
+                    state_names = {
+                        GoalStatus.SUCCEEDED: "SUCCEEDED",
+                        GoalStatus.ABORTED: "ABORTED",
+                        GoalStatus.REJECTED: "REJECTED",
+                        GoalStatus.PREEMPTED: "PREEMPTED",
+                        GoalStatus.LOST: "LOST"
+                    }
+                    state_name = state_names.get(state, "UNKNOWN")
+                    elapsed = (rospy.Time.now() - self.goal_start_time).to_sec() if self.goal_start_time else 0
+                    rospy.loginfo("Auto Explore RRT: Goal completed with status %d (%s) after %.1f seconds", 
+                                 state, state_name, elapsed)
+                    self.assigned_point = None
+                    self.goal_start_time = None
+                    self.last_robot_position = None
+                    self.stuck_check_time = None
+                    return True
+            except Exception as e:
+                rospy.logwarn("Auto Explore RRT: Error checking goal status: %s", str(e))
         return False
     
     def _handle_exploration(self):
