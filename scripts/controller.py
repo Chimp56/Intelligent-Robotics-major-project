@@ -1299,7 +1299,11 @@ class TourGuideController:
     def _handle_idle(self):
         """Handle IDLE state - robot waits for commands."""
         rospy.loginfo_throttle(10, "IDLE: Waiting for commands...")
-        # DO NOT transition here – the waypoint callback will move us to GUIDING
+
+        # If there are tour waypoints ready, start guiding
+        if self.guiding_waypoints:
+            rospy.loginfo("IDLE: waypoints available, switching to GUIDING")
+            self.transition_to(RobotState.GUIDING)
 
     
     def _handle_mapping(self):
