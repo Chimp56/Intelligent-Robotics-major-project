@@ -73,10 +73,12 @@ class AutoExploreRRT:
         self.last_waypoint_time = rospy.Time.now()
         self.visited_waypoints = set()
         self.current_waypoint = None
+        self.wander_mode = False  # Use wander mode when map is mostly unknown
         
         # Exploration region (can be set via parameters or RViz)
         self.exploration_region = None  # Will be set from map bounds or parameters
         self.use_map_bounds = True  # Use map bounds as exploration region
+        self.wander_free_threshold = 0.02  # Switch to RRT mode when 2% of map is free
         
         # Publishers and subscribers
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
@@ -139,15 +141,32 @@ class AutoExploreRRT:
             width = self.map_info.width * self.map_info.resolution
             height = self.map_info.height * self.map_info.resolution
             
-            self.exploration_region = {
-                'min_x': origin_x,
-                'max_x': origin_x + width,
-                'min_y': origin_y,
-                'max_y': origin_y + height
-            }
-            rospy.logdebug("Auto Explore RRT: Exploration region updated: (%.2f, %.2f) to (%.2f, %.2f)",
-                          self.exploration_region['min_x'], self.exploration_region['min_y'],
-                          self.exploration_region['max_x'], self.exploration_region['max_y'])
+            # If robot pose is available, center exploration region around robot
+            # (useful when map is mostly unknown and bounds are large)
+            if self.robot_pose is not None:
+                robot_x, robot_y = self.robot_pose
+                # Use a reasonable exploration radius around robot (10m)
+                exploration_radius = 10.0
+                self.exploration_region = {
+                    'min_x': max(origin_x, robot_x - exploration_radius),
+                    'max_x': min(origin_x + width, robot_x + exploration_radius),
+                    'min_y': max(origin_y, robot_y - exploration_radius),
+                    'max_y': min(origin_y + height, robot_y + exploration_radius)
+                }
+                rospy.logdebug("Auto Explore RRT: Exploration region centered on robot: (%.2f, %.2f) to (%.2f, %.2f)",
+                              self.exploration_region['min_x'], self.exploration_region['min_y'],
+                              self.exploration_region['max_x'], self.exploration_region['max_y'])
+            else:
+                # Use full map bounds
+                self.exploration_region = {
+                    'min_x': origin_x,
+                    'max_x': origin_x + width,
+                    'min_y': origin_y,
+                    'max_y': origin_y + height
+                }
+                rospy.logdebug("Auto Explore RRT: Exploration region updated: (%.2f, %.2f) to (%.2f, %.2f)",
+                              self.exploration_region['min_x'], self.exploration_region['min_y'],
+                              self.exploration_region['max_x'], self.exploration_region['max_y'])
     
     def _cb_odom(self, msg):
         """Callback for odometry updates"""
@@ -190,12 +209,39 @@ class AutoExploreRRT:
         """Callback for laser scan updates"""
         self.laser_data = msg
     
-    def _is_point_valid(self, x, y):
+    def _get_map_statistics(self):
+        """
+        Get statistics about the map (free, occupied, unknown counts)
+        
+        Returns:
+            dict with 'free', 'occupied', 'unknown', 'total' counts and percentages
+        """
+        if self.map_data is None or self.map_info is None:
+            return None
+        
+        map_array = np.array(self.map_data)
+        total = len(map_array)
+        free = np.sum((map_array == FREE) | ((map_array > 0) & (map_array < 50)))
+        occupied = np.sum(map_array >= 50)
+        unknown = np.sum(map_array == UNKNOWN)
+        
+        return {
+            'free': free,
+            'occupied': occupied,
+            'unknown': unknown,
+            'total': total,
+            'free_pct': float(free) / total if total > 0 else 0.0,
+            'occupied_pct': float(occupied) / total if total > 0 else 0.0,
+            'unknown_pct': float(unknown) / total if total > 0 else 0.0
+        }
+    
+    def _is_point_valid(self, x, y, allow_unknown=True):
         """
         Check if a point is valid for exploration (in free space, not too close to obstacles)
         
         Args:
             x, y: World coordinates
+            allow_unknown: If True, allow points in unknown space (for early exploration)
         
         Returns:
             True if point is valid, False otherwise
@@ -219,19 +265,42 @@ class AutoExploreRRT:
         map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
         cell_value = map_array[grid_y, grid_x]
         
-        # Prefer unknown or free space
-        if cell_value == UNKNOWN:
-            # Check if there's free space nearby (for navigation)
-            for dx in range(-2, 3):
-                for dy in range(-2, 3):
-                    nx, ny = grid_x + dx, grid_y + dy
-                    if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
-                        neighbor_value = map_array[ny, nx]
-                        if neighbor_value == FREE or (0 < neighbor_value < 50):
-                            return True
+        # Reject occupied space
+        if cell_value >= 50:
             return False
-        elif cell_value == FREE or (0 < cell_value < 50):
+        
+        # Accept free space
+        if cell_value == FREE or (0 < cell_value < 50):
             return True
+        
+        # Handle unknown space
+        if cell_value == UNKNOWN:
+            if allow_unknown:
+                # In wander mode or early exploration, allow unknown space
+                # But check that it's not surrounded by obstacles
+                obstacle_count = 0
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        if dx == 0 and dy == 0:
+                            continue
+                        nx, ny = grid_x + dx, grid_y + dy
+                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                            neighbor_value = map_array[ny, nx]
+                            if neighbor_value >= 50:  # Occupied
+                                obstacle_count += 1
+                
+                # Allow if not completely surrounded by obstacles
+                if obstacle_count < 8:
+                    return True
+            else:
+                # In normal RRT mode, require nearby free space for navigation
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        nx, ny = grid_x + dx, grid_y + dy
+                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                            neighbor_value = map_array[ny, nx]
+                            if neighbor_value == FREE or (0 < neighbor_value < 50):
+                                return True
         
         return False
     
@@ -246,25 +315,49 @@ class AutoExploreRRT:
             rospy.logwarn("Auto Explore RRT: No exploration region defined")
             return None
         
+        # Check if we should use wander mode (map mostly unknown)
+        stats = self._get_map_statistics()
+        if stats is not None:
+            if stats['free_pct'] < self.wander_free_threshold:
+                self.wander_mode = True
+                rospy.logdebug("Auto Explore RRT: Map is %.1f%% free, using wander mode", stats['free_pct'] * 100)
+            else:
+                self.wander_mode = False
+        
+        # In wander mode, allow unknown space and be more lenient with distance
+        allow_unknown = self.wander_mode
+        min_distance = 0.3 if self.wander_mode else MIN_GOAL_DISTANCE
+        max_distance = 3.0 if self.wander_mode else MAX_GOAL_DISTANCE
+        
         # Try to find a valid random point
-        max_attempts = 50
-        for _ in range(max_attempts):
+        max_attempts = 100 if self.wander_mode else 50  # More attempts in wander mode
+        for attempt in range(max_attempts):
             # Sample random point in exploration region
             x = random.uniform(self.exploration_region['min_x'], self.exploration_region['max_x'])
             y = random.uniform(self.exploration_region['min_y'], self.exploration_region['max_y'])
             
             # Check if point is valid
-            if self._is_point_valid(x, y):
+            if self._is_point_valid(x, y, allow_unknown=allow_unknown):
                 # Check distance from robot
                 if self.robot_pose is not None:
                     distance = math.sqrt((x - self.robot_pose[0])**2 + (y - self.robot_pose[1])**2)
-                    if MIN_GOAL_DISTANCE <= distance <= MAX_GOAL_DISTANCE:
-                        # Check if we've visited this area recently
-                        waypoint_key = (int(x * 2), int(y * 2))  # 0.5m precision
-                        if waypoint_key not in self.visited_waypoints:
-                            return (x, y)
+                    if min_distance <= distance <= max_distance:
+                        # Check if we've visited this area recently (skip in wander mode)
+                        if not self.wander_mode:
+                            waypoint_key = (int(x * 2), int(y * 2))  # 0.5m precision
+                            if waypoint_key in self.visited_waypoints:
+                                continue
+                        return (x, y)
+                else:
+                    # No robot pose, but point is valid - use it
+                    return (x, y)
         
-        rospy.logwarn("Auto Explore RRT: Could not find valid random point after %d attempts", max_attempts)
+        # Log more details about why sampling failed
+        if stats is not None:
+            rospy.logwarn("Auto Explore RRT: Could not find valid random point after %d attempts. Map stats: %.1f%% free, %.1f%% unknown, %.1f%% occupied",
+                         max_attempts, stats['free_pct'] * 100, stats['unknown_pct'] * 100, stats['occupied_pct'] * 100)
+        else:
+            rospy.logwarn("Auto Explore RRT: Could not find valid random point after %d attempts", max_attempts)
         return None
     
     def _navigate_to_waypoint(self, waypoint):
@@ -363,6 +456,23 @@ class AutoExploreRRT:
         if not self.exploring or self.state != RobotState.MAPPING:
             return
         
+        # Update exploration region if robot pose changed (for early exploration)
+        if self.robot_pose is not None and self.map_info is not None:
+            # Recalculate exploration region centered on robot
+            origin_x = self.map_info.origin.position.x
+            origin_y = self.map_info.origin.position.y
+            width = self.map_info.width * self.map_info.resolution
+            height = self.map_info.height * self.map_info.resolution
+            robot_x, robot_y = self.robot_pose
+            
+            exploration_radius = 10.0
+            self.exploration_region = {
+                'min_x': max(origin_x, robot_x - exploration_radius),
+                'max_x': min(origin_x + width, robot_x + exploration_radius),
+                'min_y': max(origin_y, robot_y - exploration_radius),
+                'max_y': min(origin_y + height, robot_y + exploration_radius)
+            }
+        
         # Check if we need a new waypoint
         if self.current_waypoint is None:
             # Check if enough time has passed since last waypoint
@@ -375,8 +485,11 @@ class AutoExploreRRT:
                     self._navigate_to_waypoint(waypoint)
                     self.last_waypoint_time = rospy.Time.now()
                 else:
-                    rospy.logwarn("Auto Explore RRT: Could not find valid waypoint")
-                    self.last_waypoint_time = rospy.Time.now()  # Wait before trying again
+                    # In wander mode, try more frequently
+                    wait_time = 0.5 if self.wander_mode else 1.0
+                    if elapsed >= wait_time:
+                        rospy.logwarn("Auto Explore RRT: Could not find valid waypoint")
+                        self.last_waypoint_time = rospy.Time.now()  # Wait before trying again
         else:
             # Check goal status
             if self._check_goal_status():
