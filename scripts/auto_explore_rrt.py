@@ -83,6 +83,16 @@ class AutoExploreRRT:
         self.last_robot_position = None  # Track robot position for stuck detection
         self.stuck_check_time = None
         
+        # Wander mode for early exploration
+        self.wander_mode = False
+        self.wander_start_time = None
+        self.last_wander_action = None
+        self.wander_direction = 1  # 1 = forward, 0 = turning
+        self.initial_rotation_done = False
+        self.initial_rotation_start_time = None
+        self.initial_rotation_accumulated = 0.0
+        self.last_odom_yaw = None
+        
         # Publishers and subscribers
         self.cmd_vel_pub = rospy.Publisher(CMD_VEL_TOPIC, Twist, queue_size=1)
         self.state_sub = rospy.Subscriber(STATE_TOPIC, String, self._cb_state)
@@ -264,8 +274,7 @@ class AutoExploreRRT:
                 # Check distance from robot
                 distance = norm(self.robot_pose - np.array([x, y]))
                 if MIN_GOAL_DISTANCE <= distance <= MAX_GOAL_DISTANCE:
-                    # Prefer points in known free space or near known free space (move_base can plan to these)
-                    # Points in unknown space will be projected, but prefer those near known space
+                    # Check map cell value to determine if we should include this point
                     resolution = self.map_info.resolution
                     origin_x = self.map_info.origin.position.x
                     origin_y = self.map_info.origin.position.y
@@ -276,26 +285,42 @@ class AutoExploreRRT:
                         map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
                         cell_value = map_array[grid_y, grid_x]
                         
-                        # If in known free space, add it
+                        # If in known free space, always add it
                         if cell_value == FREE or (0 < cell_value < 50):
                             candidates.append([x, y])
                         elif cell_value == UNKNOWN:
-                            # Check if there's known free space nearby (within 5 cells = ~0.25m at 0.05m resolution)
-                            has_nearby_free = False
-                            for dx in range(-5, 6):
-                                for dy in range(-5, 6):
-                                    nx, ny = grid_x + dx, grid_y + dy
-                                    if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
-                                        neighbor_value = map_array[ny, nx]
-                                        if neighbor_value == FREE or (0 < neighbor_value < 50):
-                                            has_nearby_free = True
-                                            break
+                            # For unknown space: check if map is mostly unknown
+                            # Use the free_pct we calculated earlier (line 233)
+                            if free_pct < 0.10:  # Less than 10% free - early exploration
+                                # Very lenient: allow unknown space points as long as not completely blocked
+                                # These will be projected to nearby known space, or robot will explore to create known space
+                                occupied_count = 0
+                                for dx in range(-1, 2):
+                                    for dy in range(-1, 2):
+                                        nx, ny = grid_x + dx, grid_y + dy
+                                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                                            neighbor_value = map_array[ny, nx]
+                                            if neighbor_value >= COSTMAP_CLEARING_THRESHOLD:
+                                                occupied_count += 1
+                                # Allow if not completely surrounded (at least 1 free/unknown neighbor)
+                                if occupied_count < 8:
+                                    candidates.append([x, y])
+                            else:
+                                # Map has more known space - require nearby known free space for projection
+                                has_nearby_free = False
+                                for dx in range(-5, 6):
+                                    for dy in range(-5, 6):
+                                        nx, ny = grid_x + dx, grid_y + dy
+                                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                                            neighbor_value = map_array[ny, nx]
+                                            if neighbor_value == FREE or (0 < neighbor_value < 50):
+                                                has_nearby_free = True
+                                                break
+                                    if has_nearby_free:
+                                        break
+                                
                                 if has_nearby_free:
-                                    break
-                            
-                            # Only add unknown space points if they have nearby known free space
-                            if has_nearby_free:
-                                candidates.append([x, y])
+                                    candidates.append([x, y])
         
         return candidates
     
@@ -663,6 +688,16 @@ class AutoExploreRRT:
             rospy.sleep(DELAY_AFTER_ASSIGNMENT)
             return
         
+        # Check if we should do initial rotation when starting (do this first)
+        if not self.initial_rotation_done:
+            self._perform_initial_rotation()
+            return
+        
+        # Check if we're in wander mode
+        if self.wander_mode:
+            self._perform_wander_exploration()
+            return
+        
         # Get robot state (available or busy)
         robot_state = self._get_robot_state()
         robot_pos = self._get_robot_position()
@@ -674,7 +709,10 @@ class AutoExploreRRT:
         candidates = self._sample_candidate_points(NUM_CANDIDATE_SAMPLES)
         
         if not candidates:
-            rospy.logwarn_throttle(5.0, "Auto Explore RRT: No valid candidate points found")
+            rospy.logwarn_throttle(5.0, "Auto Explore RRT: No valid candidate points found - entering wander mode")
+            self.wander_mode = True
+            self.wander_start_time = rospy.Time.now()
+            self._perform_wander_exploration()
             return
         
         # Calculate information gain for each candidate
@@ -745,6 +783,182 @@ class AutoExploreRRT:
                 rospy.logerr(traceback.format_exc())
             
             rate.sleep()
+    
+    def _perform_initial_rotation(self):
+        """
+        Perform initial 2-revolution rotation to scan the environment when starting mapping.
+        Similar to auto_explore.py initial rotation.
+        """
+        if self.initial_rotation_start_time is None:
+            self.initial_rotation_start_time = rospy.Time.now()
+            rospy.loginfo("Auto Explore RRT: Starting initial 2-revolution scan...")
+        
+        # Target: 2 full rotations = 4π radians
+        self.initial_rotation_target = 4 * math.pi
+        
+        # Get current yaw from odometry
+        if self.robot_yaw is not None:
+            current_yaw = self.robot_yaw
+            
+            # Initialize last yaw on first call
+            if self.last_odom_yaw is None:
+                self.last_odom_yaw = current_yaw
+                return
+            
+            # Calculate accumulated rotation (handle wrap-around)
+            yaw_diff = current_yaw - self.last_odom_yaw
+            if yaw_diff > math.pi:
+                yaw_diff -= 2 * math.pi
+            elif yaw_diff < -math.pi:
+                yaw_diff += 2 * math.pi
+            
+            self.initial_rotation_accumulated += abs(yaw_diff)
+            self.last_odom_yaw = current_yaw
+        
+        # Check if rotation is complete
+        if self.initial_rotation_accumulated >= self.initial_rotation_target:
+            rospy.loginfo("Auto Explore RRT: Initial rotation complete (%.1f degrees)", 
+                         math.degrees(self.initial_rotation_accumulated))
+            self.initial_rotation_done = True
+            twist = Twist()  # Stop
+            self.cmd_vel_pub.publish(twist)
+            rospy.sleep(0.5)
+            return
+        
+        # Rotate counter-clockwise at moderate speed
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.4  # 0.4 rad/s rotation speed
+        self.cmd_vel_pub.publish(twist)
+        
+        # Log progress
+        if self.last_odom_yaw is not None:
+            progress_pct = (self.initial_rotation_accumulated / self.initial_rotation_target) * 100
+            rospy.loginfo_throttle(2, "Auto Explore RRT: Initial rotation progress: %.1f%% (%.1f degrees / 720 degrees)", 
+                                  progress_pct, math.degrees(self.initial_rotation_accumulated))
+    
+    def _perform_wander_exploration(self):
+        """
+        Simple wander behavior when map is mostly unknown or no valid candidates found.
+        Moves in circles or wanders to explore and build initial map.
+        """
+        if self.wander_start_time is None:
+            self.wander_start_time = rospy.Time.now()
+            rospy.loginfo("Auto Explore RRT: Entering wander mode to build initial map")
+        
+        # Check if we should exit wander mode (after some time or when map has enough free space)
+        if self.map_data is not None and self.map_info is not None:
+            map_array = np.array(self.map_data)
+            total = len(map_array)
+            free = np.sum((map_array == FREE) | ((map_array > 0) & (map_array < 50)))
+            free_pct = float(free) / total if total > 0 else 0.0
+            
+            # Exit wander mode if we have enough known free space
+            if free_pct > 0.10:  # More than 10% free space
+                wander_duration = (rospy.Time.now() - self.wander_start_time).to_sec()
+                rospy.loginfo("Auto Explore RRT: Exiting wander mode after %.1f seconds (%.1f%% free space)", 
+                             wander_duration, free_pct * 100)
+                self.wander_mode = False
+                self.wander_start_time = None
+                twist = Twist()  # Stop
+                self.cmd_vel_pub.publish(twist)
+                return
+        
+        # Check for obstacles ahead
+        obstacle_ahead = self._check_obstacle_ahead()
+        
+        now = rospy.Time.now()
+        if self.last_wander_action is None:
+            self.last_wander_action = now
+        
+        elapsed = (now - self.last_wander_action).to_sec()
+        
+        # If obstacle detected, turn away
+        if obstacle_ahead:
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.5  # Turn away from obstacle
+            self.cmd_vel_pub.publish(twist)
+            self.wander_direction = 0  # Turning
+            self.last_wander_action = now
+            return
+        
+        # Alternate between moving forward and turning in a circle pattern
+        if elapsed < 2.0:
+            # Continue current action
+            if self.wander_direction == 1:  # Moving forward
+                twist = Twist()
+                twist.linear.x = 0.2
+                twist.angular.z = 0.2  # Slight curve
+                self.cmd_vel_pub.publish(twist)
+            else:  # Turning
+                twist = Twist()
+                twist.linear.x = 0.0
+                twist.angular.z = 0.4
+                self.cmd_vel_pub.publish(twist)
+            return
+        
+        # Change behavior every 2 seconds
+        self.last_wander_action = now
+        
+        # Alternate between forward movement and turning
+        if self.wander_direction == 1:
+            # Switch to turning
+            self.wander_direction = 0
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.4
+            self.cmd_vel_pub.publish(twist)
+            rospy.loginfo_throttle(3, "Auto Explore RRT: Wandering - turning")
+        else:
+            # Switch to forward movement
+            self.wander_direction = 1
+            twist = Twist()
+            twist.linear.x = 0.2
+            twist.angular.z = 0.2  # Slight curve to create circular pattern
+            self.cmd_vel_pub.publish(twist)
+            rospy.loginfo_throttle(3, "Auto Explore RRT: Wandering - moving forward")
+    
+    def _check_obstacle_ahead(self):
+        """
+        Check if there's an obstacle ahead using laser scan data.
+        Returns True if obstacle detected, False otherwise.
+        """
+        if self.laser_data is None:
+            return False
+        
+        ranges = self.laser_data.ranges
+        if not ranges:
+            return False
+        
+        # Check front 60 degrees (30 degrees on each side)
+        angle_min = self.laser_data.angle_min
+        angle_increment = self.laser_data.angle_increment
+        front_angle = math.radians(30)  # 30 degrees on each side
+        
+        front_indices = []
+        for i in range(len(ranges)):
+            angle = angle_min + i * angle_increment
+            if abs(angle) <= front_angle:
+                front_indices.append(i)
+        
+        if not front_indices:
+            return False
+        
+        # Get minimum distance in front cone
+        front_ranges = [ranges[i] for i in front_indices if ranges[i] > 0 and not math.isnan(ranges[i])]
+        
+        if not front_ranges:
+            return False
+        
+        min_distance = min(front_ranges)
+        MIN_OBSTACLE_DISTANCE = 0.5  # 50cm threshold
+        
+        # Check if obstacle is too close
+        if min_distance < MIN_OBSTACLE_DISTANCE:
+            return True
+        
+        return False
 
 
 if __name__ == '__main__':
