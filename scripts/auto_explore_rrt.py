@@ -549,30 +549,57 @@ class AutoExploreRRT:
         
         world_x, world_y = waypoint
         
-        # Project goal to known free space if needed (move_base can't plan to unknown space)
-        # This is critical - move_base needs known free space to plan paths
-        # Use larger search radius to find known free space
-        projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y, max_search_radius=3.0)
-        if projected_x != world_x or projected_y != world_y:
-            rospy.loginfo("Auto Explore RRT: Projected goal from (%.2f, %.2f) to (%.2f, %.2f) (moved to known free space)", 
-                         world_x, world_y, projected_x, projected_y)
-            world_x, world_y = projected_x, projected_y
+        # Check if goal is in known free space (move_base needs known free space to plan)
+        if self.map_data is None or self.map_info is None:
+            rospy.logwarn("Auto Explore RRT: Cannot validate goal - no map data")
+            self.assigned_point = None
+            return
+        
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+            map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+            cell_value = map_array[grid_y, grid_x]
+            
+            # Goal must be in known free space (not unknown, not occupied)
+            if cell_value == UNKNOWN:
+                # Try to project to nearby known free space
+                projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y, max_search_radius=2.0)
+                if projected_x != world_x or projected_y != world_y:
+                    rospy.loginfo("Auto Explore RRT: Projected goal from (%.2f, %.2f) to (%.2f, %.2f) (moved to known free space)", 
+                                 world_x, world_y, projected_x, projected_y)
+                    world_x, world_y = projected_x, projected_y
+                    # Verify projected goal is actually in free space
+                    grid_x = int((world_x - origin_x) / resolution)
+                    grid_y = int((world_y - origin_y) / resolution)
+                    if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+                        cell_value = map_array[grid_y, grid_x]
+                else:
+                    rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is in unknown space and couldn't be projected - rejecting", 
+                                world_x, world_y)
+                    self.assigned_point = None
+                    return
+            
+            # Final check: goal must be in free space (0-49)
+            if cell_value >= COSTMAP_CLEARING_THRESHOLD:
+                rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is in occupied space (value: %d) - rejecting", 
+                            world_x, world_y, cell_value)
+                self.assigned_point = None
+                return
+            
+            if cell_value != FREE and not (0 < cell_value < 50):
+                rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is not in known free space (value: %d) - rejecting", 
+                            world_x, world_y, cell_value)
+                self.assigned_point = None
+                return
         else:
-            # Check if original goal is in unknown space - if so, reject it (move_base can't plan to unknown space)
-            if self.map_data is not None and self.map_info is not None:
-                resolution = self.map_info.resolution
-                origin_x = self.map_info.origin.position.x
-                origin_y = self.map_info.origin.position.y
-                grid_x = int((world_x - origin_x) / resolution)
-                grid_y = int((world_y - origin_y) / resolution)
-                if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
-                    map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
-                    cell_value = map_array[grid_y, grid_x]
-                    if cell_value == UNKNOWN:
-                        rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is in unknown space and couldn't be projected to known free space within 3m - rejecting goal", 
-                                    world_x, world_y)
-                        self.assigned_point = None
-                        return  # Don't send goal if we can't project it to known free space
+            rospy.logwarn("Auto Explore RRT: Goal at (%.2f, %.2f) is out of map bounds - rejecting", world_x, world_y)
+            self.assigned_point = None
+            return
         
         # Create goal (exactly like ros_autonomous_slam robot.sendGoal())
         goal = MoveBaseGoal()
@@ -718,6 +745,27 @@ class AutoExploreRRT:
         
         if robot_pos is None:
             return
+        
+        # Check if robot position is in known free space (move_base needs this to plan)
+        if self.map_data is not None and self.map_info is not None:
+            robot_x, robot_y = self.robot_pose
+            resolution = self.map_info.resolution
+            origin_x = self.map_info.origin.position.x
+            origin_y = self.map_info.origin.position.y
+            robot_grid_x = int((robot_x - origin_x) / resolution)
+            robot_grid_y = int((robot_y - origin_y) / resolution)
+            
+            if 0 <= robot_grid_x < self.map_info.width and 0 <= robot_grid_y < self.map_info.height:
+                map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+                robot_cell_value = map_array[robot_grid_y, robot_grid_x]
+                
+                if robot_cell_value == UNKNOWN:
+                    rospy.logwarn_throttle(5.0, "Auto Explore RRT: Robot at (%.2f, %.2f) is in unknown space - entering wander mode to build map", 
+                                        robot_x, robot_y)
+                    self.wander_mode = True
+                    self.wander_start_time = rospy.Time.now()
+                    self._perform_wander_exploration()
+                    return
         
         # Sample candidate points
         candidates = self._sample_candidate_points(NUM_CANDIDATE_SAMPLES)
