@@ -612,7 +612,7 @@ class AutoExploreRRT:
         # Create goal (exactly like ros_autonomous_slam robot.sendGoal())
         goal = MoveBaseGoal()
         goal.target_pose.header.frame_id = "map"
-        goal.target_pose.header.stamp = rospy.Time.now()  # Use now() like ros_autonomous_slam
+        goal.target_pose.header.stamp = rospy.Time(0)  # Use Time(0) to avoid TF extrapolation errors
         goal.target_pose.pose.position.x = world_x
         goal.target_pose.pose.position.y = world_y
         goal.target_pose.pose.position.z = 0.0
@@ -633,16 +633,21 @@ class AutoExploreRRT:
             state = self.move_base_client.get_state()
             
             if state == GoalStatus.REJECTED:
-                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base")
+                rospy.logwarn("Auto Explore RRT: Goal rejected by move_base (failure count: %d)", self.move_base_failure_count + 1)
                 self.move_base_failure_count += 1
                 self.assigned_point = None
                 self.goal_start_time = None
                 
-                # After 3 consecutive failures, switch to direct navigation
-                if self.move_base_failure_count >= 3:
-                    rospy.logwarn("Auto Explore RRT: move_base failed %d times consecutively, will use direct navigation for next goal", 
+                # After 2 consecutive failures, switch to direct navigation (reduced from 3 for faster fallback)
+                if self.move_base_failure_count >= 2:
+                    rospy.logwarn("Auto Explore RRT: move_base failed %d times consecutively, switching to direct navigation", 
                                 self.move_base_failure_count)
                     self.use_direct_navigation = True
+                    # Cancel any pending goals
+                    try:
+                        self.move_base_client.cancel_all_goals()
+                    except:
+                        pass
             elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                 rospy.loginfo("Auto Explore RRT: Goal accepted")
                 self.move_base_failure_count = 0  # Reset on success
@@ -675,18 +680,24 @@ class AutoExploreRRT:
                             if distance_moved > 0.1:  # Moved more than 10cm
                                 self.last_robot_position = self.robot_pose.copy()
                                 self.stuck_check_time = rospy.Time.now()
-                            elif stuck_elapsed > 8.0:  # Stuck for 8 seconds - cancel and try different goal
-                                rospy.logwarn("Auto Explore RRT: Robot appears stuck (moved %.3f m in %.1f s), cancelling goal and trying closer one", 
+                            elif stuck_elapsed > 6.0:  # Stuck for 6 seconds - switch to direct navigation
+                                rospy.logwarn("Auto Explore RRT: Robot appears stuck (moved %.3f m in %.1f s), switching to direct navigation", 
                                             distance_moved, stuck_elapsed)
                                 self.move_base_client.cancel_goal()
-                                self.assigned_point = None
-                                self.goal_start_time = None
+                                self.move_base_failure_count += 1
+                                
+                                # Switch to direct navigation if we have a goal
+                                if self.assigned_point is not None:
+                                    self.use_direct_navigation = True
+                                    self.direct_nav_goal = self.assigned_point.copy()
+                                    rospy.loginfo("Auto Explore RRT: Switching to direct navigation for stuck goal at (%.2f, %.2f)", 
+                                                self.assigned_point[0], self.assigned_point[1])
+                                else:
+                                    self.assigned_point = None
+                                    self.goal_start_time = None
+                                
                                 self.last_robot_position = None
                                 self.stuck_check_time = None
-                                # Mark this goal as problematic by adding to visited (so we don't retry immediately)
-                                if self.robot_pose is not None:
-                                    waypoint_key = (int(self.robot_pose[0] * 2), int(self.robot_pose[1] * 2))
-                                    # Don't add to visited - let it try a different goal
                                 return True
                     
                     # Log progress periodically
