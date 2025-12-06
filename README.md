@@ -9,9 +9,10 @@ Act as a tour guide
 
 ## Requirements
 - Python2
-- Ros melodic
+- Ros1 melodic
 - Gazebo
 - Rviz
+- TurtleBot2
 
 ## Instructions
 
@@ -24,25 +25,56 @@ catkin_make
 source devel/setup.bash
 ```
 
+save map
+
 ```bash
-chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
+rosrun map_server map_saver -f ~/catkin_ws/src/tour_guide/maps/my_map
 ```
+
+To control turtlebot using keyboard (this will engage manual mode), open a new terminal and run:
+
+```bash
+roslaunch turtlebot_teleop keyboard_teleop.launch
+```
+
 ## Help
 
 
-
-### keyboard movement
-
 https://wiki.ros.org/cmd_vel_mux
+
+### References
+
+https://github.com/fazildgr8/ros_autonomous_slam
+https://www.youtube.com/watch?v=Zjb_2krr1Xg
+
 
 ### Vincent quick start up
 
 ```
 git stash
 git pull
+cd ~/catkin_ws/src/tour_guide/scripts
+sed -i 's/\r$//' *.py
 chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
 source ~/catkin_ws/devel/setup.bash
-roslaunch tour_guide mapping.launch
+roslaunch tour_guide controller.launch
 
+```
+
+### Testing Basic Movement
+
+To test the controller with simple circular movement:
+
+```bash
+# With simulation
+roslaunch tour_guide test_circle.launch
+
+# Minimal (real robot, no simulation)
+roslaunch tour_guide test_circle_minimal.launch
+```
+
+The robot will move in a circle. Adjust speed via parameters:
+- `linear_speed`: Forward speed (default: 0.15 m/s)
+- `angular_speed`: Rotation speed (default: 0.3 rad/s)
 
 ```
