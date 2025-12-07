@@ -30,7 +30,7 @@ WANDER_FREE_THRESHOLD = 0.02  # Switch to frontier mode when 2% free (was 5%)
 
 # Obstacle avoidance constants
 MIN_OBSTACLE_DISTANCE = 0.6 # meters - minimum safe distance from obstacles (increased for safety)
-FRONT_SCAN_ANGLE = math.radians(90)  # 90 degrees front cone to check for obstacles (wider for better detection)
+FRONT_SCAN_ANGLE = math.radians(30)  # 90 degrees front cone to check for obstacles (wider for better detection)
 SAFE_STOPPING_DISTANCE = 0.8  # meters - distance at which to start slowing down
 OBSTACLE_CHECK_RATE = 10.0  # Hz - how often to check for obstacles
 
@@ -131,6 +131,17 @@ class AutoExplore:
             rospy.logwarn(traceback.format_exc())
             self.move_base_client = None
             return False
+    
+    def _move_base_feedback_cb(self, feedback):
+        """Safe feedback callback for move_base to prevent AttributeError.
+        
+        This callback is passed to send_goal() to handle feedback safely.
+        SimpleActionClient calls this with just the feedback message.
+        The callback prevents AttributeError when feedback arrives before
+        the goal handle is fully initialized.
+        """
+        # We don't need to process feedback, just having this callback prevents the error
+        pass
 
     def run(self):
         """
@@ -273,10 +284,11 @@ class AutoExplore:
             # Track when we first detected no frontiers
             if self.last_no_frontier_time is None:
                 self.last_no_frontier_time = rospy.Time.now()
-            # If no frontiers for 10 seconds, consider exploration complete and save map
-            elif (rospy.Time.now() - self.last_no_frontier_time).to_sec() > 10.0:
+            # If no frontiers for exploration_timeout_time seconds, consider exploration complete and save map
+            exploration_timeout_time = 30.0
+            if (rospy.Time.now() - self.last_no_frontier_time).to_sec() > exploration_timeout_time:
                 if not self.map_saved:
-                    rospy.loginfo("Auto Explore: No frontiers for 10 seconds, saving map...")
+                    rospy.loginfo("Auto Explore: No frontiers for %d seconds, saving map...", exploration_timeout_time)
                     self._save_map()
             self._wander_explore()
             return
@@ -567,25 +579,45 @@ class AutoExplore:
                          world_x, world_y, cell_value)
             return False
         
-        # Check if goal has at least some known free space nearby (move_base needs known space for planning)
-        # Check 3x3 area around goal
-        known_free_nearby = False
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
+        # Check if goal itself is in unknown space - move_base often rejects these
+        if cell_value == UNKNOWN:
+            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) is in unknown space. move_base will likely reject.", 
+                         world_x, world_y)
+            # Still allow it, but be aware it might be rejected
+        
+        # Check if goal has sufficient known free space nearby (move_base needs known space for planning)
+        # Check 5x5 area around goal for better validation
+        known_free_count = 0
+        free_count = 0
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
                 nx, ny = grid_x + dx, grid_y + dy
                 if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
                     neighbor_value = map_array[ny, nx]
-                    # If at least one neighbor is known free space, goal might be reachable
-                    if neighbor_value == FREE or (0 < neighbor_value < FRONTIER_THRESHOLD):
-                        known_free_nearby = True
-                        break
-            if known_free_nearby:
-                break
+                    # Count known free space
+                    if neighbor_value == FREE:
+                        free_count += 1
+                        known_free_count += 1
+                    elif 0 < neighbor_value < FRONTIER_THRESHOLD:
+                        known_free_count += 1
         
-        if not known_free_nearby:
-            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has no known free space nearby (all unknown/occupied)", 
-                         world_x, world_y)
+        # Need at least 5 known free cells nearby for move_base to plan
+        if known_free_count < 5:
+            rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has insufficient known free space nearby (%d cells, need 5+)", 
+                         world_x, world_y, known_free_count)
             return False
+        
+        # Also check a buffer around goal for occupied space
+        buffer_cells = 3  # Check 3-cell buffer
+        for dx in range(-buffer_cells, buffer_cells + 1):
+            for dy in range(-buffer_cells, buffer_cells + 1):
+                nx, ny = grid_x + dx, grid_y + dy
+                if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                    buffer_value = map_array[ny, nx]
+                    if buffer_value >= FRONTIER_THRESHOLD:
+                        rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) has occupied space in buffer (value: %d at grid %d,%d)", 
+                                     world_x, world_y, buffer_value, nx, ny)
+                        return False
         
         return True
 
@@ -631,6 +663,75 @@ class AutoExplore:
         # Need at least 5 known free cells nearby
         return known_count >= 5
 
+    def _project_goal_to_known_space(self, world_x, world_y, max_search_radius=1.0):
+        """
+        If the goal is in unknown space, project it to the nearest known free space.
+        move_base often rejects goals in unknown space.
+        
+        Args:
+            world_x, world_y: Original goal coordinates
+            max_search_radius: Maximum distance to search for known free space (meters)
+        
+        Returns:
+            (projected_x, projected_y) - either the original coordinates if already in known space,
+            or the nearest known free space coordinates
+        """
+        if self.map_data is None or self.map_info is None:
+            return world_x, world_y  # Can't project without map
+        
+        # Convert to grid coordinates
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
+        grid_x = int((world_x - origin_x) / resolution)
+        grid_y = int((world_y - origin_y) / resolution)
+        
+        # Check bounds
+        if grid_x < 0 or grid_x >= self.map_info.width or grid_y < 0 or grid_y >= self.map_info.height:
+            return world_x, world_y  # Out of bounds, can't project
+        
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        cell_value = map_array[grid_y, grid_x]
+        
+        # If goal is already in known free space, return as-is
+        if cell_value == FREE or (0 < cell_value < FRONTIER_THRESHOLD):
+            return world_x, world_y
+        
+        # Goal is in unknown or occupied space - search for nearest known free space
+        max_search_cells = int(max_search_radius / resolution)
+        best_x, best_y = world_x, world_y
+        best_distance = float('inf')
+        
+        # Search in expanding circles
+        for radius in range(1, max_search_cells + 1):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    # Only check cells on the perimeter of this radius
+                    if abs(dx) != radius and abs(dy) != radius:
+                        continue
+                    
+                    nx, ny = grid_x + dx, grid_y + dy
+                    if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                        neighbor_value = map_array[ny, nx]
+                        # Check if this is known free space
+                        if neighbor_value == FREE or (0 < neighbor_value < FRONTIER_THRESHOLD):
+                            # Convert back to world coordinates
+                            candidate_x = nx * resolution + origin_x
+                            candidate_y = ny * resolution + origin_y
+                            distance = math.sqrt((candidate_x - world_x)**2 + (candidate_y - world_y)**2)
+                            
+                            if distance < best_distance:
+                                best_distance = distance
+                                best_x, best_y = candidate_x, candidate_y
+            
+            # If we found a candidate, return it (don't search further)
+            if best_distance < float('inf'):
+                return best_x, best_y
+        
+        # No known free space found within max radius - return original
+        return world_x, world_y
+
     def _navigate_to_frontier(self, frontier):
         """
         Navigate to a frontier using move_base
@@ -648,6 +749,14 @@ class AutoExplore:
             return
         
         world_x, world_y = frontier
+        
+        # If goal is in unknown space, try to project it to nearby known free space
+        # move_base often rejects goals in unknown space
+        projected_x, projected_y = self._project_goal_to_known_space(world_x, world_y)
+        if projected_x != world_x or projected_y != world_y:
+            rospy.loginfo("Auto Explore: Projected goal from (%.2f, %.2f) to (%.2f, %.2f) (moved to known free space)", 
+                         world_x, world_y, projected_x, projected_y)
+            world_x, world_y = projected_x, projected_y
         
         # Validate goal is valid for navigation
         if not self._is_goal_valid(world_x, world_y):
@@ -677,11 +786,11 @@ class AutoExplore:
             except Exception as e2:
                 rospy.logwarn("Auto Explore: Still no transform after wait: %s. Proceeding anyway...", str(e2))
         
-        # Create goal - use now() but ensure transform is available first
-        # The small delay above helps ensure transforms are synchronized
+        # Create goal - use Time(0) to get latest available transform
+        # This avoids extrapolation errors when the timestamp is slightly in the future
         goal = MoveBaseGoal()
         goal.target_pose.header.frame_id = "map"
-        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.header.stamp = rospy.Time(0)  # Use latest available transform
         goal.target_pose.pose.position.x = world_x
         goal.target_pose.pose.position.y = world_y
         goal.target_pose.pose.position.z = 0.0
@@ -690,7 +799,8 @@ class AutoExplore:
         # Send goal
         try:
             rospy.loginfo("Auto Explore: Sending goal to move_base at (%.2f, %.2f)", world_x, world_y)
-            self.move_base_client.send_goal(goal)
+            # Pass feedback callback to prevent AttributeError in actionlib
+            self.move_base_client.send_goal(goal, feedback_cb=self._move_base_feedback_cb)
             self.current_goal = goal
             self.goal_status = None
             self.goal_start_time = rospy.Time.now()  # Track when goal was sent
@@ -700,7 +810,43 @@ class AutoExplore:
             # Wait a bit to see if goal was accepted
             rospy.sleep(0.5)
             state = self.move_base_client.get_state()
-            rospy.loginfo("Auto Explore: Goal state after send: %d (1=PENDING, 3=ACTIVE)", state)
+            rospy.loginfo("Auto Explore: Goal state after send: %d (1=PENDING, 3=ACTIVE, 2=REJECTED)", state)
+            
+            # Check if goal was immediately rejected
+            if state == GoalStatus.REJECTED:
+                # Get more details about why it was rejected
+                try:
+                    # Check if goal is in unknown space
+                    if self.map_data is not None and self.map_info is not None:
+                        resolution = self.map_info.resolution
+                        origin_x = self.map_info.origin.position.x
+                        origin_y = self.map_info.origin.position.y
+                        grid_x = int((world_x - origin_x) / resolution)
+                        grid_y = int((world_y - origin_y) / resolution)
+                        if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+                            map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+                            cell_value = map_array[grid_y, grid_x]
+                            if cell_value == UNKNOWN:
+                                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) rejected - likely in unknown space (value: %d)", 
+                                           world_x, world_y, cell_value)
+                            elif cell_value >= FRONTIER_THRESHOLD:
+                                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) rejected - in occupied space (value: %d)", 
+                                           world_x, world_y, cell_value)
+                            else:
+                                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) rejected - may be unreachable or in costmap obstacle", 
+                                           world_x, world_y)
+                except Exception as e:
+                    rospy.logwarn("Auto Explore: Could not diagnose rejection reason: %s", str(e))
+                
+                rospy.logwarn("Auto Explore: Goal at (%.2f, %.2f) was immediately rejected by move_base. Marking as visited.", 
+                           world_x, world_y)
+                # Mark as visited to avoid retrying (use same precision as selection)
+                frontier_key = (int(world_x * 2), int(world_y * 2))
+                self.visited_frontiers.add(frontier_key)
+                rospy.loginfo("Auto Explore: Marked rejected frontier at (%.2f, %.2f) as visited (key: %s)", 
+                            world_x, world_y, frontier_key)
+                self._cancel_current_goal()
+                return
             
             # Don't mark as visited yet - only mark when goal succeeds
             # This allows retrying if goal fails or times out
@@ -1224,24 +1370,37 @@ class AutoExplore:
         rospy.loginfo("Auto Explore: Saving map to: %s", map_path)
         
         try:
-            # Use map_saver command
+            # Use map_saver command (Python 2.7 compatible)
             cmd = ['rosrun', 'map_server', 'map_saver', '-f', map_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            # Use Popen for Python 2.7 compatibility
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
-            if result.returncode == 0:
+            # Wait for completion with timeout (Python 2.7 compatible)
+            import time
+            timeout = 10.0
+            start_time = time.time()
+            while process.poll() is None:
+                if time.time() - start_time > timeout:
+                    process.terminate()
+                    rospy.logwarn("Auto Explore: Map save operation timed out")
+                    return False
+                rospy.sleep(0.1)
+            
+            # Get return code and output
+            returncode = process.returncode
+            stdout, stderr = process.communicate()
+            
+            if returncode == 0:
                 rospy.loginfo("Auto Explore: Map saved successfully!")
                 rospy.loginfo("  - %s.yaml", map_path)
                 rospy.loginfo("  - %s.pgm", map_path)
                 self.map_saved = True
                 return True
             else:
-                rospy.logwarn("Auto Explore: Failed to save map: %s", result.stderr)
+                rospy.logwarn("Auto Explore: Failed to save map: %s", stderr)
                 rospy.logwarn("Auto Explore: You can manually save the map using:")
                 rospy.logwarn("  rosrun map_server map_saver -f %s", map_path)
                 return False
-        except subprocess.TimeoutExpired:
-            rospy.logwarn("Auto Explore: Map save operation timed out")
-            return False
         except Exception as e:
             rospy.logwarn("Auto Explore: Error saving map: %s", str(e))
             rospy.logwarn("Auto Explore: You can manually save the map using:")

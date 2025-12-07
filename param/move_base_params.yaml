@@ -1,0 +1,20 @@
+# Move base configuration for more aggressive navigation
+# Allows robot to get closer to obstacles when rounding corners
+
+# Recovery behaviors
+recovery_behavior_enabled: true
+clearing_rotation_allowed: true
+conservative_reset_dist: 3.0
+aggressive_reset_dist: 0.5
+
+# Planner frequency
+planner_frequency: 1.0
+controller_frequency: 20.0
+
+# Goal tolerance
+xy_goal_tolerance: 0.15
+yaw_goal_tolerance: 0.25
+
+# Shutdown costmaps
+shutdown_costmaps: false
+
