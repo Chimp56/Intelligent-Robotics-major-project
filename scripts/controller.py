@@ -18,7 +18,7 @@ import subprocess
 import os
 import signal
 from std_msgs.msg import String, Bool
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, PoseArray
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal, MoveBaseActionResult
 from actionlib_msgs.msg import GoalStatus, GoalStatusArray
 from std_srvs.srv import Empty, EmptyResponse, SetBool, SetBoolResponse
@@ -57,6 +57,7 @@ CMD_VEL_TOPIC = '/cmd_vel_mux/input/navi'
 TELEOP_TOPIC = '/cmd_vel_mux/input/teleop'
 RGB_IMAGE_TOPIC = '/camera/rgb/image_raw'
 DEPTH_IMAGE_TOPIC = '/camera/depth/image_raw'
+SORTED_WAYPOINTS_TOPIC = '/tour_guide/sorted_waypoints'
 
 # Service names
 SERVICE_START_MAPPING = '/tour_guide/start_mapping'
@@ -113,7 +114,7 @@ class Controller:
         self.navigation_error = False
         self.goal_reached = False
         self.move_base_client = None
-        # self._init_move_base_client()
+        #self._init_move_base_client()
         
         
         # ====================================================================
@@ -145,6 +146,7 @@ class Controller:
         rospy.Subscriber(NAVIGATION_FEEDBACK_TOPIC, MoveBaseActionResult, self._cb_navigation_feedback)
         rospy.Subscriber('/move_base/status', GoalStatusArray, self._cb_move_base_status)
         rospy.Subscriber(TELEOP_TOPIC, Twist, self._cb_teleop)
+        rospy.Subscriber(SORTED_WAYPOINTS_TOPIC, PoseArray, self._cb_sorted_waypoints)
         # ====================================================================
         # ROS SERVICES (for user commands)
         # ====================================================================
@@ -304,6 +306,17 @@ class Controller:
             elif status in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED]:
                 rospy.logwarn_throttle(5, "Move base goal failed with status %d", status)
     
+    def _cb_sorted_waypoints(self, msg):
+        """
+        Callback for receiving sorted tour waypoints from the D* planner.
+
+        Stores them in self.guiding_waypoints but does not change state or
+        send navigation goals (so we don't depend on the commented code).
+        """
+        self.guiding_waypoints = [(p.position.x, p.position.y) for p in msg.poses]
+        rospy.loginfo("Controller: received %d sorted tour waypoints",
+                      len(self.guiding_waypoints))
+
     # ========================================================================
     # SERVICE HANDLERS (User Commands)
     # ========================================================================
@@ -539,7 +552,9 @@ class Controller:
         """Handle IDLE state - robot waits for commands."""
         # Robot is idle, waiting for user commands or state transitions
         rospy.loginfo_throttle(10, "IDLE: Waiting for commands...")
-        self.transition_to(RobotState.MAPPING)
+        if self.guiding_waypoints:
+            rospy.loginfo("IDLE: waypoints available, switching to GUIDING")
+            self.transition_to(RobotState.GUIDING)
     
     def _handle_mapping(self):
         """Handle MAPPING state - robot explores and builds map."""
