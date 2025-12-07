@@ -612,13 +612,14 @@ class AutoExploreRRTOpenCV:
             return
         
         # Ensure TF transform is available before sending goal (prevents extrapolation errors)
+        # Wait for TF to be ready and add a small delay to let TF buffer catch up
         try:
-            self.tf_listener.waitForTransform("map", "odom", rospy.Time(0), rospy.Duration(0.5))
-            # Small delay to ensure TF is propagated
-            rospy.sleep(0.05)
+            self.tf_listener.waitForTransform("map", "odom", rospy.Time(0), rospy.Duration(1.0))
+            # Longer delay to ensure TF buffer has recent transforms (helps with extrapolation errors)
+            rospy.sleep(0.1)
         except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
             rospy.logwarn("Auto Explore RRT OpenCV: TF transform not ready, waiting...")
-            rospy.sleep(0.1)
+            rospy.sleep(0.2)
         
         # Create goal pose
         from geometry_msgs.msg import PoseStamped
@@ -639,7 +640,9 @@ class AutoExploreRRTOpenCV:
                 self.assigned_point = np.array([world_x, world_y])
                 self.goal_start_time = rospy.Time.now()
                 self.last_robot_position = self.robot_pose.copy() if self.robot_pose is not None else None
-                self.stuck_check_time = rospy.Time.now()
+                # Don't start stuck check immediately - give move_base time to start planning/moving
+                # Set stuck_check_time to None initially, it will be set when we first check movement
+                self.stuck_check_time = None
             else:
                 # Use actionlib interface (with feedback)
                 goal = MoveBaseGoal()
@@ -648,7 +651,9 @@ class AutoExploreRRTOpenCV:
                 self.assigned_point = np.array([world_x, world_y])
                 self.goal_start_time = rospy.Time.now()
                 self.last_robot_position = self.robot_pose.copy() if self.robot_pose is not None else None
-                self.stuck_check_time = rospy.Time.now()
+                # Don't start stuck check immediately - give move_base time to start planning/moving
+                # Set stuck_check_time to None initially, it will be set when we first check movement
+                self.stuck_check_time = None
                 
                 rospy.loginfo("Auto Explore RRT OpenCV: Assigned goal (%.2f, %.2f)", world_x, world_y)
                 
@@ -697,6 +702,20 @@ class AutoExploreRRTOpenCV:
                     elapsed = (rospy.Time.now() - self.goal_start_time).to_sec()
                     
                     # Check if robot is stuck (not moving)
+                    # Give move_base a grace period (3 seconds) to start planning/moving before checking for stuck
+                    grace_period = 3.0  # seconds
+                    if elapsed < grace_period:
+                        # During grace period, just initialize tracking but don't check for stuck
+                        if self.last_robot_position is None and self.robot_pose is not None:
+                            self.last_robot_position = self.robot_pose.copy()
+                        elif self.robot_pose is not None:
+                            distance_moved = norm(self.robot_pose - self.last_robot_position)
+                            if distance_moved > 0.1:  # Moved more than 10cm
+                                self.last_robot_position = self.robot_pose.copy()
+                                self.stuck_check_time = None  # Reset stuck check
+                        return False  # Don't timeout during grace period
+                    
+                    # After grace period, check for stuck
                     if self.robot_pose is not None:
                         if self.last_robot_position is None:
                             self.last_robot_position = self.robot_pose.copy()
@@ -709,9 +728,12 @@ class AutoExploreRRTOpenCV:
                                 self.stuck_check_time = rospy.Time.now()
                             else:
                                 # Check if stuck
-                                if self.stuck_check_time is not None:
+                                if self.stuck_check_time is None:
+                                    # Initialize stuck check time if not set
+                                    self.stuck_check_time = rospy.Time.now()
+                                else:
                                     stuck_elapsed = (rospy.Time.now() - self.stuck_check_time).to_sec()
-                                    if stuck_elapsed > 6.0:  # Stuck for 6 seconds - switch to direct navigation
+                                    if stuck_elapsed > 8.0:  # Stuck for 8 seconds (increased from 6) - switch to direct navigation
                                         rospy.logwarn("Auto Explore RRT OpenCV: Robot appears stuck (moved %.3f m in %.1f s), switching to direct navigation", distance_moved, stuck_elapsed)
                                         self.move_base_client.cancel_goal()
                                         self.move_base_failure_count += 1
