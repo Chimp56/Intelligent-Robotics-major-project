@@ -242,10 +242,37 @@ class AutoExploreRRTOpenCV:
     def _cb_odom(self, msg):
         """Callback for odometry updates"""
         try:
+            # Safety check: monitor robot's z position to detect if it falls through floor
+            robot_z = msg.pose.pose.position.z
+            if robot_z < -0.1:  # Robot has fallen below ground level
+                rospy.logerr("Auto Explore RRT OpenCV: CRITICAL - Robot has fallen through floor! z=%.3f m", robot_z)
+                # Stop all motion immediately
+                twist = Twist()
+                self.cmd_vel_pub.publish(twist)
+                # Clear all goals
+                self.direct_nav_goal = None
+                self.assigned_point = None
+                self.use_direct_navigation = False
+                if not self.use_simple_interface and self.move_base_client is not None:
+                    try:
+                        self.move_base_client.cancel_all_goals()
+                    except:
+                        pass
+                return  # Don't update pose if robot has fallen
+            
             # Try to get robot pose in map frame using TF
             try:
                 self.tf_listener.waitForTransform("map", "base_footprint", rospy.Time(0), rospy.Duration(0.5))
                 (trans, rot) = self.tf_listener.lookupTransform("map", "base_footprint", rospy.Time(0))
+                
+                # Safety check: ensure z position is reasonable
+                if trans[2] < -0.1:
+                    rospy.logerr("Auto Explore RRT OpenCV: CRITICAL - Robot TF shows z=%.3f m (below ground)!", trans[2])
+                    # Stop all motion
+                    twist = Twist()
+                    self.cmd_vel_pub.publish(twist)
+                    return
+                
                 self.robot_pose = np.array([trans[0], trans[1]])
                 
                 # Extract yaw from quaternion
@@ -256,6 +283,14 @@ class AutoExploreRRTOpenCV:
                 try:
                     self.tf_listener.waitForTransform("map", "base_link", rospy.Time(0), rospy.Duration(0.5))
                     (trans, rot) = self.tf_listener.lookupTransform("map", "base_link", rospy.Time(0))
+                    
+                    # Safety check
+                    if trans[2] < -0.1:
+                        rospy.logerr("Auto Explore RRT OpenCV: CRITICAL - Robot TF shows z=%.3f m (below ground)!", trans[2])
+                        twist = Twist()
+                        self.cmd_vel_pub.publish(twist)
+                        return
+                    
                     self.robot_pose = np.array([trans[0], trans[1]])
                     qx, qy, qz, qw = rot
                     self.robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
