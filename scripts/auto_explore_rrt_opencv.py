@@ -957,11 +957,26 @@ class AutoExploreRRTOpenCV:
         # If using direct navigation, continue navigating (only if we have a valid goal)
         # Make sure move_base goals are canceled and costmaps cleared to prevent TF errors
         if self.use_direct_navigation:
-            # Ensure any lingering move_base goals are canceled (prevents TF extrapolation errors)
+            # Only cancel move_base if it's truly not working
+            # If move_base has an active goal and is making progress, don't interfere
             if not self.use_simple_interface and self.move_base_client is not None:
                 try:
                     state = self.move_base_client.get_state()
+                    # Only cancel if move_base is not actively navigating
+                    # If move_base is working, let it handle navigation
                     if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
+                        # Check if robot is actually moving (move_base might be working)
+                        if self.robot_pose is not None and self.last_robot_position is not None:
+                            distance_moved = norm(self.robot_pose - self.last_robot_position)
+                            # If robot moved more than 5cm, move_base is probably working
+                            if distance_moved > 0.05:
+                                # move_base is working, disable direct navigation
+                                rospy.loginfo("Auto Explore RRT OpenCV: move_base is working, disabling direct navigation")
+                                self.use_direct_navigation = False
+                                self.direct_nav_goal = None
+                                return  # Let move_base handle navigation
+                        
+                        # Only cancel if move_base is truly stuck
                         self.move_base_client.cancel_all_goals()
                         # Clear costmaps to stop move_base from trying to plan
                         if self.clear_local_costmap is not None:
@@ -1638,6 +1653,21 @@ class AutoExploreRRTOpenCV:
             self.use_direct_navigation = False
             # Don't sleep - return immediately so exploration loop can assign new goal on next iteration
             return
+        
+        # IMPORTANT: Check if move_base is active and has a valid plan before using direct navigation
+        # If move_base is working, let it handle navigation instead of direct navigation
+        if not self.use_simple_interface and self.move_base_client is not None:
+            try:
+                state = self.move_base_client.get_state()
+                if state == GoalStatus.ACTIVE:
+                    # move_base is active and has a plan - let it handle navigation
+                    # Don't interfere with move_base's path planning
+                    rospy.loginfo_throttle(5.0, "Auto Explore RRT OpenCV: move_base is active with a plan, disabling direct navigation")
+                    self.use_direct_navigation = False
+                    self.direct_nav_goal = None
+                    return  # Let move_base handle navigation
+            except:
+                pass
         
         # If obstacle ahead and we're trying to move forward, turn away
         # But allow turning even if there are walls on the sides
