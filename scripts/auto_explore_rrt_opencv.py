@@ -1001,11 +1001,58 @@ class AutoExploreRRTOpenCV:
         if self.assigned_point is not None:
             info_gains = discount(map_data_obj, self.assigned_point, candidates, info_gains, INFO_RADIUS)
         
-        # Calculate revenue for each candidate
+        # Calculate revenue for each candidate, with safety check for sufficient known space
         revenues = []
+        map_array = np.array(self.map_data).reshape((self.map_info.height, self.map_info.width))
+        resolution = self.map_info.resolution
+        origin_x = self.map_info.origin.position.x
+        origin_y = self.map_info.origin.position.y
+        
         for i, candidate in enumerate(candidates):
             candidate_pos = np.array(candidate)
             distance = norm(robot_pos - candidate_pos)
+            
+            # Check if goal has sufficient known free space around it (safety buffer)
+            # This prevents selecting goals that are barely in the map
+            SAFETY_BUFFER_RADIUS = 0.5  # meters - require 0.5m radius of known free space
+            buffer_radius_grid = int(SAFETY_BUFFER_RADIUS / resolution)
+            
+            candidate_x, candidate_y = candidate
+            grid_x = int((candidate_x - origin_x) / resolution)
+            grid_y = int((candidate_y - origin_y) / resolution)
+            
+            # Check if goal has sufficient known free space in a radius around it
+            has_sufficient_space = True
+            if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
+                # Check cells in a radius around the goal
+                free_neighbors = 0
+                total_neighbors = 0
+                
+                for dx in range(-buffer_radius_grid, buffer_radius_grid + 1):
+                    for dy in range(-buffer_radius_grid, buffer_radius_grid + 1):
+                        dist_sq = dx*dx + dy*dy
+                        if dist_sq > buffer_radius_grid * buffer_radius_grid:
+                            continue
+                        
+                        nx, ny = grid_x + dx, grid_y + dy
+                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                            total_neighbors += 1
+                            neighbor_value = map_array[ny, nx]
+                            if neighbor_value == FREE or (0 < neighbor_value < 50):
+                                free_neighbors += 1
+                
+                # Require at least 60% of neighbors to be known free space
+                if total_neighbors > 0:
+                    free_ratio = float(free_neighbors) / total_neighbors
+                    if free_ratio < 0.6:
+                        has_sufficient_space = False
+                        rospy.logdebug("Auto Explore RRT OpenCV: Candidate (%.2f, %.2f) rejected - insufficient known space (%.1f%% free)", 
+                                     candidate_x, candidate_y, free_ratio * 100)
+            
+            # Skip candidates without sufficient known space (too risky)
+            if not has_sufficient_space:
+                revenues.append(-1000.0)  # Very negative revenue to ensure it's not selected
+                continue
             
             # Apply hysteresis if within hysteresis radius
             information_gain = info_gains[i]
