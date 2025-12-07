@@ -997,6 +997,18 @@ class AutoExploreRRTOpenCV:
         if robot_pos is None:
             return
         
+        # If robot is available and we're not using move_base, cancel any lingering move_base goals
+        # This prevents move_base from trying to plan and causing TF extrapolation errors
+        if robot_state == 0 and not self.use_direct_navigation and not self.use_simple_interface:
+            if self.move_base_client is not None:
+                try:
+                    state = self.move_base_client.get_state()
+                    if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
+                        rospy.logdebug_throttle(5.0, "Auto Explore RRT OpenCV: Canceling lingering move_base goal (robot is available)")
+                        self.move_base_client.cancel_all_goals()
+                except:
+                    pass
+        
         # Check if robot position is in known free space (move_base needs this to plan)
         if self.map_data is not None and self.map_info is not None:
             robot_x, robot_y = self.robot_pose
@@ -1121,6 +1133,17 @@ class AutoExploreRRTOpenCV:
             rospy.loginfo("Auto Explore RRT OpenCV: Assigning goal (%.2f, %.2f) with revenue %.2f (IG: %.2f, dist: %.2f)",
                          best_waypoint[0], best_waypoint[1], revenues[winner_id], 
                          info_gains[winner_id], norm(robot_pos - np.array(best_waypoint)))
+            
+            # Cancel any existing move_base goals before assigning a new one (prevents TF errors)
+            if not self.use_direct_navigation and not self.use_simple_interface and self.move_base_client is not None:
+                try:
+                    state = self.move_base_client.get_state()
+                    if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
+                        rospy.logdebug("Auto Explore RRT OpenCV: Canceling existing move_base goal before assigning new one")
+                        self.move_base_client.cancel_all_goals()
+                        rospy.sleep(0.1)  # Brief pause to let cancellation propagate
+                except:
+                    pass
             
             # Use direct navigation if move_base has been failing
             if self.use_direct_navigation:
