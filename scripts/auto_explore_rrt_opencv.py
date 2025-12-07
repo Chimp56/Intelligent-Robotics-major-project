@@ -1119,8 +1119,9 @@ class AutoExploreRRTOpenCV:
             distance = norm(robot_pos - candidate_pos)
             
             # Check if goal has sufficient known free space around it (safety buffer)
-            # This prevents selecting goals that are barely in the map
+            # This prevents selecting goals that are barely in the map or too close to walls
             SAFETY_BUFFER_RADIUS = 0.5  # meters - require 0.5m radius of known free space
+            MIN_WALL_DISTANCE = 0.4  # meters - minimum distance from walls/occupied cells
             buffer_radius_grid = int(SAFETY_BUFFER_RADIUS / resolution)
             
             candidate_x, candidate_y = candidate
@@ -1129,10 +1130,14 @@ class AutoExploreRRTOpenCV:
             
             # Check if goal has sufficient known free space in a radius around it
             has_sufficient_space = True
+            too_close_to_wall = False
+            wall_penalty = 0.0
+            
             if 0 <= grid_x < self.map_info.width and 0 <= grid_y < self.map_info.height:
                 # Check cells in a radius around the goal
                 free_neighbors = 0
                 total_neighbors = 0
+                min_wall_distance = float('inf')
                 
                 for dx in range(-buffer_radius_grid, buffer_radius_grid + 1):
                     for dy in range(-buffer_radius_grid, buffer_radius_grid + 1):
@@ -1146,6 +1151,10 @@ class AutoExploreRRTOpenCV:
                             neighbor_value = map_array[ny, nx]
                             if neighbor_value == FREE or (0 < neighbor_value < 50):
                                 free_neighbors += 1
+                            elif neighbor_value >= COSTMAP_CLEARING_THRESHOLD:
+                                # Calculate distance to this occupied cell
+                                dist_to_wall = math.sqrt(dist_sq) * resolution
+                                min_wall_distance = min(min_wall_distance, dist_to_wall)
                 
                 # Require at least 60% of neighbors to be known free space
                 if total_neighbors > 0:
@@ -1154,9 +1163,24 @@ class AutoExploreRRTOpenCV:
                         has_sufficient_space = False
                         rospy.logdebug("Auto Explore RRT OpenCV: Candidate (%.2f, %.2f) rejected - insufficient known space (%.1f%% free)", 
                                      candidate_x, candidate_y, free_ratio * 100)
+                
+                # Check if goal is too close to walls
+                if min_wall_distance < MIN_WALL_DISTANCE:
+                    too_close_to_wall = True
+                    rospy.logdebug("Auto Explore RRT OpenCV: Candidate (%.2f, %.2f) rejected - too close to wall (%.2f m)", 
+                                 candidate_x, candidate_y, min_wall_distance)
+                
+                # Add penalty based on proximity to walls (even if not too close)
+                if min_wall_distance < float('inf'):
+                    # Penalty increases as we get closer to walls
+                    # At MIN_WALL_DISTANCE, penalty is 50% of information gain
+                    # At 2*MIN_WALL_DISTANCE, penalty is 0%
+                    if min_wall_distance < 2 * MIN_WALL_DISTANCE:
+                        wall_penalty_factor = 1.0 - (min_wall_distance / (2 * MIN_WALL_DISTANCE))
+                        wall_penalty = wall_penalty_factor * 0.5  # Up to 50% penalty
             
-            # Skip candidates without sufficient known space (too risky)
-            if not has_sufficient_space:
+            # Skip candidates without sufficient known space or too close to walls (too risky)
+            if not has_sufficient_space or too_close_to_wall:
                 revenues.append(-1000.0)  # Very negative revenue to ensure it's not selected
                 continue
             
@@ -1165,8 +1189,13 @@ class AutoExploreRRTOpenCV:
             if distance <= HYSTERESIS_RADIUS:
                 information_gain *= HYSTERESIS_GAIN
             
+            # Apply wall proximity penalty (reduces revenue for goals near walls)
+            # This prevents selecting goals that are too close to walls
+            penalized_ig = information_gain * (1.0 - wall_penalty)
+            
             # Revenue = information gain * multiplier - distance cost
-            revenue = information_gain * INFO_MULTIPLIER - distance
+            # Penalized information gain is used to reduce preference for goals near walls
+            revenue = penalized_ig * INFO_MULTIPLIER - distance
             revenues.append(revenue)
         
         # Select and assign goal based on revenue
