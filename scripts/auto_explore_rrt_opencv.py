@@ -348,9 +348,13 @@ class AutoExploreRRTOpenCV:
                 if self.robot_pose is not None and self.assigned_point is not None:
                     distance = norm(self.robot_pose - self.assigned_point)
                     if distance < 0.3:  # Within 30cm of goal
-                        rospy.loginfo("Auto Explore RRT OpenCV: Goal reached (distance: %.2f m)", distance)
+                        rospy.loginfo("Auto Explore RRT OpenCV: Goal reached (distance: %.2f m), marking as available for new goal", distance)
                         self.assigned_point = None
                         self.goal_start_time = None
+                        self.direct_nav_goal = None  # Also clear direct nav goal if set
+                        self.use_direct_navigation = False  # Reset direct nav flag
+                        self.last_robot_position = None  # Reset position tracking
+                        self.stuck_check_time = None  # Reset stuck check
                         return 0
                 return 1  # Busy
             return 0  # Available
@@ -878,7 +882,7 @@ class AutoExploreRRTOpenCV:
         if not self.use_direct_navigation and not self.use_simple_interface:
             if self._check_goal_timeout():
                 rospy.loginfo("Auto Explore RRT OpenCV: Goal timed out, will try new goal on next iteration")
-                rospy.sleep(DELAY_AFTER_ASSIGNMENT)
+                # Don't sleep - continue immediately to assign new goal
                 return
         
         # If using direct navigation, continue navigating (only if we have a valid goal)
@@ -1401,7 +1405,7 @@ class AutoExploreRRTOpenCV:
         
         # If close enough, stop
         if distance < 0.3:
-            rospy.loginfo("Auto Explore RRT OpenCV: Direct navigation goal reached (distance: %.2f m)", distance)
+            rospy.loginfo("Auto Explore RRT OpenCV: Direct navigation goal reached (distance: %.2f m), ready for new goal", distance)
             self.direct_nav_goal = None
             self.assigned_point = None
             self.goal_start_time = None  # Clear goal start time
@@ -1412,7 +1416,7 @@ class AutoExploreRRTOpenCV:
             # Reset move_base failure count on success
             self.move_base_failure_count = 0
             self.use_direct_navigation = False
-            rospy.sleep(0.5)  # Brief pause before next goal assignment
+            # Don't sleep - return immediately so exploration loop can assign new goal on next iteration
             return
         
         # If obstacle ahead, turn away
