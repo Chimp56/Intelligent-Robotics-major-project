@@ -740,6 +740,11 @@ class AutoExploreRRTOpenCV:
                                 
                                 # Switch to direct navigation if we have a goal
                                 if self.assigned_point is not None:
+                                    # Cancel move_base goal before switching to direct navigation
+                                    try:
+                                        self.move_base_client.cancel_goal()
+                                    except:
+                                        pass
                                     self.use_direct_navigation = True
                                     self.direct_nav_goal = self.assigned_point.copy()
                                     rospy.loginfo("Auto Explore RRT OpenCV: Switching to direct navigation for stuck goal at (%.2f, %.2f)", 
@@ -917,7 +922,17 @@ class AutoExploreRRTOpenCV:
                 return
         
         # If using direct navigation, continue navigating (only if we have a valid goal)
+        # Make sure move_base goals are canceled when using direct navigation to prevent TF errors
         if self.use_direct_navigation:
+            # Ensure any lingering move_base goals are canceled (prevents TF extrapolation errors)
+            if not self.use_simple_interface and self.move_base_client is not None:
+                try:
+                    state = self.move_base_client.get_state()
+                    if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
+                        self.move_base_client.cancel_goal()
+                except:
+                    pass
+            
             if self.direct_nav_goal is not None and self.robot_pose is not None:
                 # Check if goal is still valid (not too far away)
                 distance = norm(self.robot_pose - self.direct_nav_goal)
@@ -1437,6 +1452,12 @@ class AutoExploreRRTOpenCV:
         # If close enough, stop
         if distance < 0.3:
             rospy.loginfo("Auto Explore RRT OpenCV: Direct navigation goal reached (distance: %.2f m), ready for new goal", distance)
+            # Cancel any lingering move_base goals to prevent TF errors
+            if not self.use_simple_interface and self.move_base_client is not None:
+                try:
+                    self.move_base_client.cancel_all_goals()
+                except:
+                    pass
             self.direct_nav_goal = None
             self.assigned_point = None
             self.goal_start_time = None  # Clear goal start time
