@@ -1,5 +1,7 @@
 # Custom gmapping parameters to reduce odometry drift
 # These parameters improve loop closure detection and map accuracy
+# NOTE: This file is used with gmapping_custom.launch.xml which remaps odometry
+# to use EKF output (odom_combined) instead of raw odometry (/odom)
 
 # Scan matching parameters (improve loop closure)
 maxUrange: 8.0              # Maximum usable range of laser (meters)

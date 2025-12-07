@@ -1,0 +1,23 @@
+<launch>
+  <!-- Custom gmapping launch file that uses EKF output (odom_combined) instead of raw odometry -->
+  <!-- This reduces map shifting by using fused IMU + odometry data -->
+  
+  <arg name="scan_topic" default="scan"/>
+  
+  <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
+    <!-- Remap odometry to use EKF output instead of raw odometry -->
+    <remap from="odom" to="odom_combined"/>
+    
+    <!-- Remap scan topic -->
+    <remap from="scan" to="$(arg scan_topic)"/>
+    
+    <!-- Load custom gmapping parameters -->
+    <rosparam file="$(find tour_guide)/param/gmapping_params.yaml" command="load"/>
+    
+    <!-- Frame IDs -->
+    <param name="odom_frame" value="odom"/>
+    <param name="base_frame" value="base_footprint"/>
+    <param name="map_frame" value="map"/>
+  </node>
+</launch>
+
