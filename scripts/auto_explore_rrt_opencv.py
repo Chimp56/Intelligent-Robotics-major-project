@@ -637,7 +637,12 @@ class AutoExploreRRTOpenCV:
     
     def _check_goal_timeout(self):
         """Check if current goal has timed out or robot is stuck (only for actionlib interface)"""
-        if self.goal_start_time is not None and self.move_base_client is not None and not self.use_simple_interface:
+        # Only check if we have an active goal and are using actionlib (not simple interface or direct nav)
+        if (self.goal_start_time is not None and 
+            self.assigned_point is not None and 
+            self.move_base_client is not None and 
+            not self.use_simple_interface and
+            not self.use_direct_navigation):
             try:
                 state = self.move_base_client.get_state()
                 if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
@@ -830,14 +835,16 @@ class AutoExploreRRTOpenCV:
                                    self.map_data is not None, self.map_info is not None, self.robot_pose is not None)
             return
         
-        # Update OpenCV visualization
-        self._visualize_map_opencv()
+        # Update OpenCV visualization (throttled to reduce CPU usage)
+        if self.show_opencv:
+            self._visualize_map_opencv()
         
         # Check for goal timeout (only if using move_base actionlib, not direct navigation or simple interface)
-        if not self.use_direct_navigation and not self.use_simple_interface and self._check_goal_timeout():
-            rospy.loginfo("Auto Explore RRT OpenCV: Goal timed out, will try new goal on next iteration")
-            rospy.sleep(DELAY_AFTER_ASSIGNMENT)
-            return
+        if not self.use_direct_navigation and not self.use_simple_interface:
+            if self._check_goal_timeout():
+                rospy.loginfo("Auto Explore RRT OpenCV: Goal timed out, will try new goal on next iteration")
+                rospy.sleep(DELAY_AFTER_ASSIGNMENT)
+                return
         
         # If using direct navigation, continue navigating (only if we have a valid goal)
         if self.use_direct_navigation:
@@ -864,7 +871,7 @@ class AutoExploreRRTOpenCV:
         
         # Check if we should do initial rotation when starting (do this first)
         if not self.initial_rotation_done:
-            rospy.loginfo("Auto Explore RRT OpenCV: Performing initial rotation...")
+            rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Performing initial rotation...")
             self._perform_initial_rotation()
             return
         
@@ -1055,7 +1062,7 @@ class AutoExploreRRTOpenCV:
         twist.linear.x = 0.0
         twist.angular.z = 0.4  # 0.4 rad/s rotation speed
         self.cmd_vel_pub.publish(twist)
-        rospy.loginfo_throttle(1, "Auto Explore RRT OpenCV: Publishing rotation command (angular.z=%.2f)", twist.angular.z)
+        rospy.logdebug_throttle(1, "Auto Explore RRT OpenCV: Publishing rotation command (angular.z=%.2f)", twist.angular.z)
         
         # Log progress
         if self.last_odom_yaw is not None:
@@ -1279,11 +1286,15 @@ class AutoExploreRRTOpenCV:
             rospy.loginfo("Auto Explore RRT OpenCV: Direct navigation goal reached (distance: %.2f m)", distance)
             self.direct_nav_goal = None
             self.assigned_point = None
+            self.goal_start_time = None  # Clear goal start time
+            self.last_robot_position = None  # Reset position tracking
+            self.stuck_check_time = None  # Reset stuck check
             twist = Twist()
             self.cmd_vel_pub.publish(twist)
             # Reset move_base failure count on success
             self.move_base_failure_count = 0
             self.use_direct_navigation = False
+            rospy.sleep(0.5)  # Brief pause before next goal assignment
             return
         
         # If obstacle ahead, turn away
