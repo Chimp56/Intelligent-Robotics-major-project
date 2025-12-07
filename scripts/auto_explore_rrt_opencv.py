@@ -611,6 +611,15 @@ class AutoExploreRRTOpenCV:
             self.assigned_point = None
             return
         
+        # Ensure TF transform is available before sending goal (prevents extrapolation errors)
+        try:
+            self.tf_listener.waitForTransform("map", "odom", rospy.Time(0), rospy.Duration(0.5))
+            # Small delay to ensure TF is propagated
+            rospy.sleep(0.05)
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+            rospy.logwarn("Auto Explore RRT OpenCV: TF transform not ready, waiting...")
+            rospy.sleep(0.1)
+        
         # Create goal pose
         from geometry_msgs.msg import PoseStamped
         goal_pose = PoseStamped()
