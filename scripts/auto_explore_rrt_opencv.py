@@ -1422,10 +1422,15 @@ class AutoExploreRRTOpenCV:
             self.cmd_vel_pub.publish(twist)
             rospy.loginfo_throttle(3, "Auto Explore RRT OpenCV: Wandering - moving forward (spiral, factor=%.2f)", spiral_factor)
     
-    def _check_obstacle_ahead(self):
+    def _check_obstacle_ahead(self, check_sides=False):
         """
         Check if there's an obstacle ahead using laser scan data.
-        Returns True if obstacle detected, False otherwise.
+        
+        Args:
+            check_sides: If True, also check for obstacles on the sides (for turning)
+        
+        Returns:
+            True if obstacle detected, False otherwise.
         """
         if self.laser_data is None:
             return False
@@ -1434,10 +1439,15 @@ class AutoExploreRRTOpenCV:
         if not ranges:
             return False
         
-        # Check front 60 degrees (30 degrees on each side)
         angle_min = self.laser_data.angle_min
         angle_increment = self.laser_data.angle_increment
-        front_angle = math.radians(30)  # 30 degrees on each side
+        
+        if check_sides:
+            # When checking sides, use a narrower front cone (only 20 degrees)
+            front_angle = math.radians(20)  # Narrower cone when turning
+        else:
+            # Normal front check: 60 degrees (30 degrees on each side)
+            front_angle = math.radians(30)
         
         front_indices = []
         for i in range(len(ranges)):
@@ -1459,6 +1469,60 @@ class AutoExploreRRTOpenCV:
         
         # Check if obstacle is too close
         if min_distance < MIN_OBSTACLE_DISTANCE:
+            return True
+        
+        return False
+    
+    def _check_obstacle_on_side(self, side='left'):
+        """
+        Check if there's an obstacle on a specific side.
+        
+        Args:
+            side: 'left' or 'right'
+        
+        Returns:
+            True if obstacle is very close on that side (< 0.3m), False otherwise.
+        """
+        if self.laser_data is None:
+            return False
+        
+        ranges = self.laser_data.ranges
+        if not ranges:
+            return False
+        
+        angle_min = self.laser_data.angle_min
+        angle_increment = self.laser_data.angle_increment
+        
+        # Check side angles (60-90 degrees from front)
+        if side == 'left':
+            # Left side: 60-90 degrees to the left
+            min_angle = math.radians(60)
+            max_angle = math.radians(90)
+        else:
+            # Right side: 60-90 degrees to the right
+            min_angle = -math.radians(90)
+            max_angle = -math.radians(60)
+        
+        side_indices = []
+        for i in range(len(ranges)):
+            angle = angle_min + i * angle_increment
+            if min_angle <= angle <= max_angle:
+                side_indices.append(i)
+        
+        if not side_indices:
+            return False
+        
+        # Get minimum distance on that side
+        side_ranges = [ranges[i] for i in side_indices if ranges[i] > 0 and not math.isnan(ranges[i])]
+        
+        if not side_ranges:
+            return False
+        
+        min_distance = min(side_ranges)
+        SIDE_OBSTACLE_DISTANCE = 0.3  # 30cm threshold for side obstacles (tighter)
+        
+        # Check if obstacle is very close on that side
+        if min_distance < SIDE_OBSTACLE_DISTANCE:
             return True
         
         return False
@@ -1513,8 +1577,16 @@ class AutoExploreRRTOpenCV:
         while angle_diff < -math.pi:
             angle_diff += 2 * math.pi
         
-        # Check for obstacles
-        obstacle_ahead = self._check_obstacle_ahead()
+        # Check for obstacles (use narrower cone when turning to allow turns near walls)
+        abs_angle_diff = abs(angle_diff)
+        is_turning = abs_angle_diff > math.radians(15)  # More than 15 degrees off
+        
+        if is_turning:
+            # When turning, use narrower obstacle check to allow turning near side walls
+            obstacle_ahead = self._check_obstacle_ahead(check_sides=True)
+        else:
+            # When moving forward, use normal obstacle check
+            obstacle_ahead = self._check_obstacle_ahead(check_sides=False)
         
         # If close enough, stop
         if distance < 0.3:
@@ -1538,20 +1610,35 @@ class AutoExploreRRTOpenCV:
             # Don't sleep - return immediately so exploration loop can assign new goal on next iteration
             return
         
-        # If obstacle ahead, turn away
-        if obstacle_ahead:
+        # If obstacle ahead and we're trying to move forward, turn away
+        # But allow turning even if there are walls on the sides
+        if obstacle_ahead and not is_turning:
+            # Obstacle ahead and we're trying to move forward - turn away
             twist = Twist()
             twist.linear.x = 0.0
-            twist.angular.z = 0.5  # Turn away
+            # Turn in the direction that avoids the obstacle
+            # Check which side has more space
+            left_obstacle = self._check_obstacle_on_side('left')
+            right_obstacle = self._check_obstacle_on_side('right')
+            
+            if left_obstacle and not right_obstacle:
+                twist.angular.z = -0.5  # Turn right
+            elif right_obstacle and not left_obstacle:
+                twist.angular.z = 0.5  # Turn left
+            else:
+                # Turn toward goal direction
+                twist.angular.z = 0.5 if angle_diff > 0 else -0.5
             self.cmd_vel_pub.publish(twist)
             return
         
-        # Turn toward goal if not aligned
+        # Turn toward goal if not aligned (allow turning even with side walls)
         if abs(angle_diff) > 0.15:  # ~8.6 degrees (reduced threshold for faster alignment)
             twist = Twist()
             twist.linear.x = 0.0
             # Use proportional control for smoother turning
-            angular_speed = min(0.6, abs(angle_diff) * 1.5)  # Faster turn for larger angles
+            # Increased max angular speed and multiplier to allow faster turning near walls
+            max_angular = 0.8  # Increased from 0.6 to allow faster turning
+            angular_speed = min(max_angular, abs(angle_diff) * 2.5)  # Increased from 1.5 to 2.5 for faster response
             twist.angular.z = angular_speed if angle_diff > 0 else -angular_speed
             self.cmd_vel_pub.publish(twist)
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Direct nav - turning toward goal (angle diff: %.2f rad, speed: %.2f)", 
