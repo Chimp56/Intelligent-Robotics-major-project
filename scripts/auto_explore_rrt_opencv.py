@@ -852,22 +852,46 @@ class AutoExploreRRTOpenCV:
                 # Check if goal is still valid (not too far away)
                 distance = norm(self.robot_pose - self.direct_nav_goal)
                 if distance > MAX_GOAL_DISTANCE * 2:  # Goal is too far, cancel it
-                    rospy.logwarn("Auto Explore RRT OpenCV: Direct nav goal too far (%.2f m), canceling", distance)
+                    rospy.logwarn("Auto Explore RRT OpenCV: Direct nav goal too far (%.2f m), canceling and will assign new goal", distance)
                     self.direct_nav_goal = None
                     self.assigned_point = None
+                    self.goal_start_time = None  # Clear goal start time
+                    self.last_robot_position = None  # Reset position tracking
+                    self.stuck_check_time = None  # Reset stuck check
                     self.use_direct_navigation = False
+                    self.move_base_failure_count = 0  # Reset failure count to try move_base again
+                    # Cancel any move_base goals
+                    if not self.use_simple_interface and self.move_base_client is not None:
+                        try:
+                            self.move_base_client.cancel_all_goals()
+                        except:
+                            pass
                     twist = Twist()
                     self.cmd_vel_pub.publish(twist)
+                    rospy.sleep(0.5)  # Brief pause before continuing to exploration
+                    # Don't return - continue to exploration logic to get a new goal
                 else:
                     self._navigate_directly(self.direct_nav_goal.tolist())
+                    return  # Continue direct navigation
             else:
                 # No valid goal, exit direct navigation
                 rospy.loginfo("Auto Explore RRT OpenCV: Direct nav has no valid goal, exiting direct navigation mode")
                 self.use_direct_navigation = False
                 self.direct_nav_goal = None
+                self.assigned_point = None
+                self.goal_start_time = None
+                self.last_robot_position = None
+                self.stuck_check_time = None
+                # Cancel any move_base goals
+                if not self.use_simple_interface and self.move_base_client is not None:
+                    try:
+                        self.move_base_client.cancel_all_goals()
+                    except:
+                        pass
                 twist = Twist()
                 self.cmd_vel_pub.publish(twist)
-            return
+                rospy.sleep(0.5)  # Brief pause before continuing to exploration
+                # Don't return - continue to exploration logic to get a new goal
         
         # Check if we should do initial rotation when starting (do this first)
         if not self.initial_rotation_done:
@@ -1258,6 +1282,18 @@ class AutoExploreRRTOpenCV:
         dx = world_x - robot_x
         dy = world_y - robot_y
         distance = math.sqrt(dx*dx + dy*dy)
+        
+        # Check if goal is still within reasonable distance (don't navigate to goals that are too far)
+        if distance > MAX_GOAL_DISTANCE * 2:
+            rospy.logwarn("Auto Explore RRT OpenCV: Direct nav goal too far (%.2f m), canceling", distance)
+            self.direct_nav_goal = None
+            self.assigned_point = None
+            self.goal_start_time = None
+            self.use_direct_navigation = False
+            twist = Twist()
+            self.cmd_vel_pub.publish(twist)
+            return
+        
         target_angle = math.atan2(dy, dx)
         
         # Get current robot yaw
