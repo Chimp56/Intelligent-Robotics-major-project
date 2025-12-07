@@ -73,6 +73,10 @@
     <node pkg="tour_guide" type="auto_explore_rrt.py" name="auto_explore_rrt" output="screen">
     </node>
   </group>
+
+  <node pkg="tour_guide" type="auto_explore_rrt_opencv.py" name="auto_explore_rrt_opencv" output="screen"
+    if="$(eval arg('exploration_algorithm') == 'rrt_opencv')">
+  </node>
   
   <node pkg="tour_guide" type="position_logger.py" name="position_logger" output="screen">
   </node>
