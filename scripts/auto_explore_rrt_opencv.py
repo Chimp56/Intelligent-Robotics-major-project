@@ -23,6 +23,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from actionlib_msgs.msg import GoalStatus
+from std_srvs.srv import Empty
 import actionlib
 from controller import RobotState, STATE_TOPIC, CMD_VEL_TOPIC
 from rrt_functions import informationGain, gridValue, is_valid_point, discount, point_of_index, index_of_point
@@ -90,6 +91,10 @@ class AutoExploreRRTOpenCV:
         self.assigned_point = None  # Currently assigned exploration point
         self.goal_start_time = None
         
+        # Service clients for clearing costmaps (to stop move_base from planning)
+        self.clear_local_costmap = None
+        self.clear_global_costmap = None
+        
         # Exploration state
         self.exploring = False
         self.candidate_points = []  # List of candidate exploration points
@@ -135,12 +140,29 @@ class AutoExploreRRTOpenCV:
         rospy.loginfo("Auto Explore RRT OpenCV: Initialization complete")
     
     def _init_move_base_client(self):
-        """Initialize the move_base action client"""
+        """Initialize the move_base action client and costmap clearing services"""
         try:
-            self.move_base_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
-            rospy.loginfo("Auto Explore RRT OpenCV: Waiting for move_base action server...")
-            self.move_base_client.wait_for_server(rospy.Duration(5.0))
-            rospy.loginfo("Auto Explore RRT OpenCV: move_base action server connected")
+            if not self.use_simple_interface:
+                self.move_base_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+                rospy.loginfo("Auto Explore RRT OpenCV: Waiting for move_base action server...")
+                self.move_base_client.wait_for_server(rospy.Duration(5.0))
+                rospy.loginfo("Auto Explore RRT OpenCV: move_base action server connected")
+            else:
+                self.move_base_simple_pub = rospy.Publisher('/move_base_simple/goal', PoseStamped, queue_size=1)
+                rospy.loginfo("Auto Explore RRT OpenCV: Using move_base_simple/goal topic interface")
+            
+            # Initialize costmap clearing services (to stop move_base from planning)
+            try:
+                rospy.wait_for_service('/move_base/local_costmap/reset', timeout=2.0)
+                self.clear_local_costmap = rospy.ServiceProxy('/move_base/local_costmap/reset', Empty)
+            except:
+                rospy.logwarn_throttle(5.0, "Auto Explore RRT OpenCV: Could not connect to local costmap clear service")
+            
+            try:
+                rospy.wait_for_service('/move_base/global_costmap/reset', timeout=2.0)
+                self.clear_global_costmap = rospy.ServiceProxy('/move_base/global_costmap/reset', Empty)
+            except:
+                rospy.logwarn_throttle(5.0, "Auto Explore RRT OpenCV: Could not connect to global costmap clear service")
         except Exception as e:
             rospy.logwarn("Auto Explore RRT OpenCV: Failed to connect to move_base: %s", str(e))
             self.move_base_client = None
@@ -735,7 +757,18 @@ class AutoExploreRRTOpenCV:
                                     stuck_elapsed = (rospy.Time.now() - self.stuck_check_time).to_sec()
                                     if stuck_elapsed > 8.0:  # Stuck for 8 seconds (increased from 6) - switch to direct navigation
                                         rospy.logwarn("Auto Explore RRT OpenCV: Robot appears stuck (moved %.3f m in %.1f s), switching to direct navigation", distance_moved, stuck_elapsed)
-                                        self.move_base_client.cancel_goal()
+                                        self.move_base_client.cancel_all_goals()
+                                        # Clear costmaps to stop move_base from trying to plan
+                                        if self.clear_local_costmap is not None:
+                                            try:
+                                                self.clear_local_costmap()
+                                            except:
+                                                pass
+                                        if self.clear_global_costmap is not None:
+                                            try:
+                                                self.clear_global_costmap()
+                                            except:
+                                                pass
                                         self.move_base_failure_count += 1
                                 
                                 # Switch to direct navigation if we have a goal
@@ -922,14 +955,25 @@ class AutoExploreRRTOpenCV:
                 return
         
         # If using direct navigation, continue navigating (only if we have a valid goal)
-        # Make sure move_base goals are canceled when using direct navigation to prevent TF errors
+        # Make sure move_base goals are canceled and costmaps cleared to prevent TF errors
         if self.use_direct_navigation:
             # Ensure any lingering move_base goals are canceled (prevents TF extrapolation errors)
             if not self.use_simple_interface and self.move_base_client is not None:
                 try:
                     state = self.move_base_client.get_state()
                     if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
-                        self.move_base_client.cancel_goal()
+                        self.move_base_client.cancel_all_goals()
+                        # Clear costmaps to stop move_base from trying to plan
+                        if self.clear_local_costmap is not None:
+                            try:
+                                self.clear_local_costmap()
+                            except:
+                                pass
+                        if self.clear_global_costmap is not None:
+                            try:
+                                self.clear_global_costmap()
+                            except:
+                                pass
                 except:
                     pass
             
