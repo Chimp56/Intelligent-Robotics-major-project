@@ -1575,7 +1575,9 @@ class AutoExploreRRTOpenCV:
             return False
         
         min_distance = min(front_ranges)
-        MIN_OBSTACLE_DISTANCE = 0.5  # 50cm threshold
+        # Increased safety distance to prevent collisions
+        # Use 0.6m for normal checks (was 0.5m) to give more buffer
+        MIN_OBSTACLE_DISTANCE = 0.6  # 60cm threshold (increased from 50cm for safety)
         
         # Check if obstacle is too close
         if min_distance < MIN_OBSTACLE_DISTANCE:
@@ -1687,7 +1689,8 @@ class AutoExploreRRTOpenCV:
         while angle_diff < -math.pi:
             angle_diff += 2 * math.pi
         
-        # Check for obstacles (use narrower cone when turning to allow turns near walls)
+        # ALWAYS check for obstacles before any movement
+        # Use narrower cone when turning to allow turns near walls
         abs_angle_diff = abs(angle_diff)
         is_turning = abs_angle_diff > math.radians(15)  # More than 15 degrees off
         
@@ -1695,7 +1698,7 @@ class AutoExploreRRTOpenCV:
             # When turning, use narrower obstacle check to allow turning near side walls
             obstacle_ahead = self._check_obstacle_ahead(check_sides=True)
         else:
-            # When moving forward, use normal obstacle check
+            # When moving forward, use normal obstacle check (stricter)
             obstacle_ahead = self._check_obstacle_ahead(check_sides=False)
         
         # If close enough, stop
@@ -1770,6 +1773,31 @@ class AutoExploreRRTOpenCV:
         
         # Turn toward goal if not aligned (allow turning even with side walls)
         if abs(angle_diff) > 0.15:  # ~8.6 degrees (reduced threshold for faster alignment)
+            # Even when turning, check if there's an obstacle directly ahead
+            # If turning would take us into a wall, turn the other way
+            obstacle_directly_ahead = self._check_obstacle_ahead(check_sides=False)  # Use full cone check
+            
+            if obstacle_directly_ahead:
+                # There's an obstacle directly ahead - don't turn toward it
+                # Turn away from the obstacle instead
+                rospy.logwarn("Auto Explore RRT OpenCV: Direct nav - obstacle directly ahead while turning, turning away")
+                twist = Twist()
+                twist.linear.x = 0.0
+                # Check which side has more space
+                left_obstacle = self._check_obstacle_on_side('left')
+                right_obstacle = self._check_obstacle_on_side('right')
+                
+                if left_obstacle and not right_obstacle:
+                    twist.angular.z = -0.5  # Turn right
+                elif right_obstacle and not left_obstacle:
+                    twist.angular.z = 0.5  # Turn left
+                else:
+                    # Turn away from goal if it's blocked
+                    twist.angular.z = -0.5 if angle_diff > 0 else 0.5  # Turn opposite direction
+                self.cmd_vel_pub.publish(twist)
+                return
+            
+            # No obstacle directly ahead - safe to turn toward goal
             twist = Twist()
             twist.linear.x = 0.0
             # Use proportional control for smoother turning
@@ -1781,10 +1809,62 @@ class AutoExploreRRTOpenCV:
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Direct nav - turning toward goal (angle diff: %.2f rad, speed: %.2f)", 
                                  angle_diff, angular_speed)
         else:
-            # Move forward toward goal
+            # Move forward toward goal - but ALWAYS check for obstacles first
+            # Re-check obstacles right before moving forward (obstacles might have appeared)
+            obstacle_ahead_now = self._check_obstacle_ahead(check_sides=False)
+            
+            if obstacle_ahead_now:
+                # Obstacle detected while trying to move forward - stop and turn away
+                rospy.logwarn("Auto Explore RRT OpenCV: Direct nav - obstacle detected while moving forward, stopping and turning")
+                twist = Twist()
+                twist.linear.x = 0.0
+                # Turn in the direction that avoids the obstacle
+                left_obstacle = self._check_obstacle_on_side('left')
+                right_obstacle = self._check_obstacle_on_side('right')
+                
+                if left_obstacle and not right_obstacle:
+                    twist.angular.z = -0.5  # Turn right
+                elif right_obstacle and not left_obstacle:
+                    twist.angular.z = 0.5  # Turn left
+                else:
+                    # Turn toward goal direction
+                    twist.angular.z = 0.5 if angle_diff > 0 else -0.5
+                self.cmd_vel_pub.publish(twist)
+                return
+            
+            # No obstacle detected - safe to move forward
+            # Get current obstacle distance to adjust speed
+            if self.laser_data is not None and self.laser_data.ranges:
+                ranges = self.laser_data.ranges
+                angle_min = self.laser_data.angle_min
+                angle_increment = self.laser_data.angle_increment
+                front_angle = math.radians(30)  # 30 degrees on each side
+                
+                front_ranges = []
+                for i in range(len(ranges)):
+                    angle = angle_min + i * angle_increment
+                    if abs(angle) <= front_angle and ranges[i] > 0 and not math.isnan(ranges[i]):
+                        front_ranges.append(ranges[i])
+                
+                if front_ranges:
+                    min_obstacle_distance = min(front_ranges)
+                    # Slow down if obstacle is close (within 1.0m)
+                    if min_obstacle_distance < 1.0:
+                        # Reduce speed proportionally as we get closer to obstacles
+                        speed_factor = max(0.3, min_obstacle_distance / 1.0)  # 30% to 100% of normal speed
+                        base_speed = min(0.25, distance * 0.4)
+                        speed = base_speed * speed_factor
+                    else:
+                        # Normal speed when obstacles are far
+                        speed = min(0.25, distance * 0.4)
+                else:
+                    # No laser data in front, be cautious
+                    speed = min(0.15, distance * 0.3)
+            else:
+                # No laser data available, be very cautious
+                speed = min(0.15, distance * 0.3)
+            
             twist = Twist()
-            # Slow down as we approach goal
-            speed = min(0.25, distance * 0.4)  # Slightly faster
             twist.linear.x = speed
             twist.angular.z = 0.2 * angle_diff  # Proportional correction
             self.cmd_vel_pub.publish(twist)
