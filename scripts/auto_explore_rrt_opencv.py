@@ -1695,8 +1695,29 @@ class AutoExploreRRTOpenCV:
         is_turning = abs_angle_diff > math.radians(15)  # More than 15 degrees off
         
         if is_turning:
-            # When turning, use narrower obstacle check to allow turning near side walls
-            obstacle_ahead = self._check_obstacle_ahead(check_sides=True)
+            # When turning, be very permissive - only check a very narrow cone directly ahead
+            # This allows turning in corners and near walls without getting stuck
+            if self.laser_data is not None and self.laser_data.ranges:
+                ranges = self.laser_data.ranges
+                angle_min = self.laser_data.angle_min
+                angle_increment = self.laser_data.angle_increment
+                # Very narrow cone (10 degrees) when turning - we're not moving forward
+                narrow_angle = math.radians(10)
+                
+                narrow_ranges = []
+                for i in range(len(ranges)):
+                    angle = angle_min + i * angle_increment
+                    if abs(angle) <= narrow_angle and ranges[i] > 0 and not math.isnan(ranges[i]):
+                        narrow_ranges.append(ranges[i])
+                
+                if narrow_ranges:
+                    min_narrow_distance = min(narrow_ranges)
+                    # Only consider it an obstacle if VERY close (30cm) when turning
+                    obstacle_ahead = min_narrow_distance < 0.3
+                else:
+                    obstacle_ahead = False
+            else:
+                obstacle_ahead = False
         else:
             # When moving forward, use normal obstacle check (stricter)
             obstacle_ahead = self._check_obstacle_ahead(check_sides=False)
@@ -1773,31 +1794,46 @@ class AutoExploreRRTOpenCV:
         
         # Turn toward goal if not aligned (allow turning even with side walls)
         if abs(angle_diff) > 0.15:  # ~8.6 degrees (reduced threshold for faster alignment)
-            # Even when turning, check if there's an obstacle directly ahead
-            # If turning would take us into a wall, turn the other way
-            obstacle_directly_ahead = self._check_obstacle_ahead(check_sides=False)  # Use full cone check
-            
-            if obstacle_directly_ahead:
-                # There's an obstacle directly ahead - don't turn toward it
-                # Turn away from the obstacle instead
-                rospy.logwarn("Auto Explore RRT OpenCV: Direct nav - obstacle directly ahead while turning, turning away")
-                twist = Twist()
-                twist.linear.x = 0.0
-                # Check which side has more space
-                left_obstacle = self._check_obstacle_on_side('left')
-                right_obstacle = self._check_obstacle_on_side('right')
+            # When turning, be more permissive about obstacles
+            # Only check a very narrow cone directly ahead (10 degrees) since we're not moving forward
+            # This allows turning in corners and near walls
+            if self.laser_data is not None and self.laser_data.ranges:
+                ranges = self.laser_data.ranges
+                angle_min = self.laser_data.angle_min
+                angle_increment = self.laser_data.angle_increment
+                # Very narrow cone check (10 degrees) - only check directly ahead when turning
+                narrow_angle = math.radians(10)
                 
-                if left_obstacle and not right_obstacle:
-                    twist.angular.z = -0.5  # Turn right
-                elif right_obstacle and not left_obstacle:
-                    twist.angular.z = 0.5  # Turn left
-                else:
-                    # Turn away from goal if it's blocked
-                    twist.angular.z = -0.5 if angle_diff > 0 else 0.5  # Turn opposite direction
-                self.cmd_vel_pub.publish(twist)
-                return
+                narrow_ranges = []
+                for i in range(len(ranges)):
+                    angle = angle_min + i * angle_increment
+                    if abs(angle) <= narrow_angle and ranges[i] > 0 and not math.isnan(ranges[i]):
+                        narrow_ranges.append(ranges[i])
+                
+                # Only prevent turning if obstacle is VERY close directly ahead (30cm)
+                # This allows turning even when near walls
+                if narrow_ranges:
+                    min_narrow_distance = min(narrow_ranges)
+                    if min_narrow_distance < 0.3:  # Very close obstacle directly ahead
+                        # Obstacle very close directly ahead - turn away from it
+                        rospy.logwarn("Auto Explore RRT OpenCV: Direct nav - very close obstacle directly ahead (%.2f m), turning away", min_narrow_distance)
+                        twist = Twist()
+                        twist.linear.x = 0.0
+                        # Check which side has more space
+                        left_obstacle = self._check_obstacle_on_side('left')
+                        right_obstacle = self._check_obstacle_on_side('right')
+                        
+                        if left_obstacle and not right_obstacle:
+                            twist.angular.z = -0.6  # Turn right (faster to get unstuck)
+                        elif right_obstacle and not left_obstacle:
+                            twist.angular.z = 0.6  # Turn left (faster to get unstuck)
+                        else:
+                            # Turn away from goal if both sides blocked
+                            twist.angular.z = -0.6 if angle_diff > 0 else 0.6  # Turn opposite direction
+                        self.cmd_vel_pub.publish(twist)
+                        return
             
-            # No obstacle directly ahead - safe to turn toward goal
+            # Safe to turn toward goal (no very close obstacle directly ahead)
             twist = Twist()
             twist.linear.x = 0.0
             # Use proportional control for smoother turning
