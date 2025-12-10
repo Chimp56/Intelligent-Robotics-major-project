@@ -38,9 +38,9 @@ delta: 0.05                 # Map resolution (meters per pixel) - 0.05 = 5cm res
 
 # Loop closure parameters (critical for reducing drift)
 # Increased sampling ranges for better loop closure detection
-llsamplerange: 0.02         # Likelihood sampling range (increased for better loop closure)
+llsamplerange: 0.05         # Likelihood sampling range (increased for better loop closure)
 llsamplestep: 0.01          # Likelihood sampling step
-lasamplerange: 0.01         # Likelihood angular sampling range (increased)
+lasamplerange: 0.02         # Likelihood angular sampling range (increased)
 lasamplestep: 0.005         # Likelihood angular sampling step
 
 # Additional parameters for better loop closure
