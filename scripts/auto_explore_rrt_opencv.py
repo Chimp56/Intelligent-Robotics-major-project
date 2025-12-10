@@ -803,7 +803,7 @@ class AutoExploreRRTOpenCV:
                         self.stuck_check_time = None
                         return True
                 elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
-                    # Goal completed or failed
+                    # Goal completed or failed - clear state and return False (not a timeout, goal is done)
                     state_names = {
                         GoalStatus.SUCCEEDED: "SUCCEEDED",
                         GoalStatus.ABORTED: "ABORTED",
@@ -819,7 +819,9 @@ class AutoExploreRRTOpenCV:
                     self.goal_start_time = None
                     self.last_robot_position = None
                     self.stuck_check_time = None
-                    return True
+                    self.use_direct_navigation = False  # Reset direct nav flag
+                    self.direct_nav_goal = None  # Clear direct nav goal
+                    return False  # Return False - goal is done, not a timeout, will be handled by _get_robot_state()
             except Exception as e:
                 rospy.logwarn("Auto Explore RRT OpenCV: Error checking goal status: %s", str(e))
         return False
@@ -962,21 +964,28 @@ class AutoExploreRRTOpenCV:
             if not self.use_simple_interface and self.move_base_client is not None:
                 try:
                     state = self.move_base_client.get_state()
-                    # Only cancel if move_base is not actively navigating
-                    # If move_base is working, let it handle navigation
+                    # Only check if move_base is active - if it's not active, we can use direct navigation
                     if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                         # Check if robot is actually moving (move_base might be working)
+                        # Only disable direct navigation if move_base is making clear progress
                         if self.robot_pose is not None and self.last_robot_position is not None:
                             distance_moved = norm(self.robot_pose - self.last_robot_position)
-                            # If robot moved more than 5cm, move_base is probably working
-                            if distance_moved > 0.05:
+                            # If robot moved more than 10cm in the last iteration, move_base is probably working
+                            if distance_moved > 0.10:
                                 # move_base is working, disable direct navigation
-                                rospy.loginfo("Auto Explore RRT OpenCV: move_base is working, disabling direct navigation")
+                                rospy.loginfo("Auto Explore RRT OpenCV: move_base is working (moved %.3f m), disabling direct navigation", distance_moved)
                                 self.use_direct_navigation = False
                                 self.direct_nav_goal = None
+                                # Update last position for next check
+                                self.last_robot_position = self.robot_pose.copy()
                                 return  # Let move_base handle navigation
-                        
-                        # Only cancel if move_base is truly stuck
+                        # If move_base is active but robot isn't moving much, keep using direct navigation
+                        # Don't cancel move_base here - let it try, but we'll use direct navigation as backup
+                    elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                        # move_base goal is done, we can continue with direct navigation
+                        pass
+                    else:
+                        # move_base has no active goal, cancel any lingering goals and clear costmaps
                         self.move_base_client.cancel_all_goals()
                         # Clear costmaps to stop move_base from trying to plan
                         if self.clear_local_costmap is not None:
@@ -1654,18 +1663,28 @@ class AutoExploreRRTOpenCV:
             # Don't sleep - return immediately so exploration loop can assign new goal on next iteration
             return
         
-        # IMPORTANT: Check if move_base is active and has a valid plan before using direct navigation
+        # IMPORTANT: Check if move_base is active and making progress before using direct navigation
         # If move_base is working, let it handle navigation instead of direct navigation
         if not self.use_simple_interface and self.move_base_client is not None:
             try:
                 state = self.move_base_client.get_state()
                 if state == GoalStatus.ACTIVE:
-                    # move_base is active and has a plan - let it handle navigation
-                    # Don't interfere with move_base's path planning
-                    rospy.loginfo_throttle(5.0, "Auto Explore RRT OpenCV: move_base is active with a plan, disabling direct navigation")
-                    self.use_direct_navigation = False
-                    self.direct_nav_goal = None
-                    return  # Let move_base handle navigation
+                    # Check if robot is actually moving (move_base might be working)
+                    if self.robot_pose is not None and self.last_robot_position is not None:
+                        distance_moved = norm(self.robot_pose - self.last_robot_position)
+                        # If robot moved more than 10cm, move_base is probably working
+                        if distance_moved > 0.10:
+                            # move_base is working, disable direct navigation
+                            rospy.loginfo_throttle(5.0, "Auto Explore RRT OpenCV: move_base is active and making progress (moved %.3f m), disabling direct navigation", distance_moved)
+                            self.use_direct_navigation = False
+                            self.direct_nav_goal = None
+                            # Update last position for next check
+                            self.last_robot_position = self.robot_pose.copy()
+                            return  # Let move_base handle navigation
+                    # If move_base is active but robot isn't moving much, continue with direct navigation as backup
+                elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                    # move_base goal is done, we can continue with direct navigation
+                    pass
             except:
                 pass
         
