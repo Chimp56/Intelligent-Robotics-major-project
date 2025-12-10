@@ -1,6 +1,6 @@
 <launch>
   <arg name="gui"        default="true"/>
-  <arg name"world_name" default="tour_world">
+  <arg name"world_name" default="tour_world"/>
   <arg name="world_file" default="$(find tour_guide)/worlds/$(world_name).world"/>
 
 <!-- Initial pose (in feet and degrees) -->
