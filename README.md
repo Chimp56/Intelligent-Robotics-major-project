@@ -65,11 +65,17 @@ Uses Rapidly Exploring Random Tree (RRT) algorithm to randomly sample waypoints 
 roslaunch tour_guide controller.launch exploration_algorithm:=rrt
 ```
 
+```bash
+roslaunch tour_guide controller.launch exploration_algorithm:=rrt_opencv
+```
+
 The RRT algorithm:
 - Randomly samples waypoints in the exploration region (automatically set from map bounds)
 - Prefers waypoints in unknown space with nearby free space for navigation
 - Avoids revisiting recently visited areas
 - Uses move_base for navigation to waypoints
+
+
 
 ## Help
 
@@ -93,6 +99,8 @@ cd ~/catkin_ws/src/tour_guide/scripts
 sed -i 's/\r$//' *.py
 chmod +x ~/catkin_ws/src/tour_guide/scripts/*.py
 source ~/catkin_ws/devel/setup.bash
+roslaunch tour_guide controller.launch exploration_algorithm:=rrt_opencv
+
 roslaunch tour_guide controller.launch
 
 ```
