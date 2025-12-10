@@ -16,17 +16,18 @@ ogain: 3.0                  # Gain for smoothing likelihood
 lskip: 0                    # Number of beams to skip in scan matching
 
 # Motion model parameters (reduce odometry error accumulation)
-srr: 0.01                   # Odometry error in rotation as a function of rotation
-srt: 0.02                   # Odometry error in rotation as a function of translation
-str: 0.01                   # Odometry error in translation as a function of rotation
-stt: 0.02                   # Odometry error in translation as a function of translation
+# Slightly increased to account for real-world odometry uncertainty
+srr: 0.02                   # Odometry error in rotation as a function of rotation (increased for better loop closure)
+srt: 0.03                   # Odometry error in rotation as a function of translation
+str: 0.02                   # Odometry error in translation as a function of rotation
+stt: 0.03                   # Odometry error in translation as a function of translation
 
 # Map update parameters (improve loop closure detection)
-linearUpdate: 0.3            # Process scan when robot moves this far (meters) - reduced for more frequent updates
-angularUpdate: 0.2          # Process scan when robot rotates this much (radians) - reduced for more frequent updates
-temporalUpdate: -1.0        # Process scan if last update is older than this (seconds, -1 = disabled)
+linearUpdate: 0.1            # Process scan when robot moves this far (meters) - reduced for more frequent updates
+angularUpdate: 0.1          # Process scan when robot rotates this much (radians) 
+temporalUpdate: 2.0          # Process scan if last update is older than this (seconds) - ensures regular updates
 resampleThreshold: 0.5      # Neff threshold for resampling
-particles: 80               # Number of particles (more = better but slower)
+particles: 160               # Number of particles 
 
 # Map resolution and size
 xmin: -10.0                 # Minimum x coordinate (meters)
@@ -36,11 +37,12 @@ ymax: 10.0                  # Maximum y coordinate (meters)
 delta: 0.05                 # Map resolution (meters per pixel) - 0.05 = 5cm resolution
 
 # Loop closure parameters (critical for reducing drift)
-llsamplerange: 0.01         # Likelihood sampling range
+# Increased sampling ranges for better loop closure detection
+llsamplerange: 0.02         # Likelihood sampling range (increased for better loop closure)
 llsamplestep: 0.01          # Likelihood sampling step
-lasamplerange: 0.005        # Likelihood angular sampling range
+lasamplerange: 0.01         # Likelihood angular sampling range (increased)
 lasamplestep: 0.005         # Likelihood angular sampling step
 
 # Additional parameters for better loop closure
-minimumScore: 0.0           # Minimum score for accepting a scan match
+minimumScore: 0.0           # Minimum score for accepting a scan match (0 = accept all matches)
 
