@@ -1016,48 +1016,56 @@ class AutoExploreRRTOpenCV:
                     self.direct_nav_start_position = self.robot_pose.copy()
                 
                 # Check if direct navigation is stuck (not making progress)
-                direct_nav_elapsed = (rospy.Time.now() - self.direct_nav_start_time).to_sec()
-                if direct_nav_elapsed > 5.0:  # After 5 seconds, check if we're making progress
-                    distance_moved = norm(self.robot_pose - self.direct_nav_start_position)
-                    if distance_moved < 0.15:  # Moved less than 15cm in 5+ seconds
-                        # Direct navigation is stuck, try move_base again
-                        rospy.logwarn("Auto Explore RRT OpenCV: Direct navigation stuck (moved %.3f m in %.1f s), switching back to move_base", 
-                                    distance_moved, direct_nav_elapsed)
-                        # Stop direct navigation
-                        twist = Twist()
-                        self.cmd_vel_pub.publish(twist)
-                        # Clear direct navigation state
-                        self.use_direct_navigation = False
-                        self.direct_nav_goal = None
-                        self.direct_nav_start_time = None
-                        self.direct_nav_start_position = None
-                        # Reset move_base failure count to give it another chance
-                        self.move_base_failure_count = 0
-                        # Cancel any lingering move_base goals
-                        if not self.use_simple_interface and self.move_base_client is not None:
-                            try:
-                                self.move_base_client.cancel_all_goals()
-                            except:
-                                pass
-                        # Clear costmaps
-                        if self.clear_local_costmap is not None:
-                            try:
-                                self.clear_local_costmap()
-                            except:
-                                pass
-                        if self.clear_global_costmap is not None:
-                            try:
-                                self.clear_global_costmap()
-                            except:
-                                pass
-                        # Continue to exploration logic to try move_base again
-                        # Don't return - let it fall through to assign a new goal with move_base
+                # Only check if we have valid tracking data
+                if self.direct_nav_start_time is not None and self.direct_nav_start_position is not None:
+                    direct_nav_elapsed = (rospy.Time.now() - self.direct_nav_start_time).to_sec()
+                    if direct_nav_elapsed > 5.0:  # After 5 seconds, check if we're making progress
+                        distance_moved = norm(self.robot_pose - self.direct_nav_start_position)
+                        if distance_moved < 0.15:  # Moved less than 15cm in 5+ seconds
+                            # Direct navigation is stuck, try move_base again
+                            rospy.logwarn("Auto Explore RRT OpenCV: Direct navigation stuck (moved %.3f m in %.1f s), switching back to move_base", 
+                                        distance_moved, direct_nav_elapsed)
+                            # Stop direct navigation
+                            twist = Twist()
+                            self.cmd_vel_pub.publish(twist)
+                            # Clear direct navigation state
+                            self.use_direct_navigation = False
+                            self.direct_nav_goal = None
+                            self.direct_nav_start_time = None
+                            self.direct_nav_start_position = None
+                            # Reset move_base failure count to give it another chance
+                            self.move_base_failure_count = 0
+                            # Cancel any lingering move_base goals
+                            if not self.use_simple_interface and self.move_base_client is not None:
+                                try:
+                                    self.move_base_client.cancel_all_goals()
+                                except:
+                                    pass
+                            # Clear costmaps
+                            if self.clear_local_costmap is not None:
+                                try:
+                                    self.clear_local_costmap()
+                                except:
+                                    pass
+                            if self.clear_global_costmap is not None:
+                                try:
+                                    self.clear_global_costmap()
+                                except:
+                                    pass
+                            # Return immediately to let exploration logic try move_base again
+                            return
                     else:
                         # Making progress, reset tracking
                         self.direct_nav_start_time = rospy.Time.now()
                         self.direct_nav_start_position = self.robot_pose.copy()
                 
                 # Check if goal is still valid (not too far away)
+                # Re-check that direct_nav_goal is still valid (it might have been cleared above)
+                if self.direct_nav_goal is None:
+                    # Goal was cleared (e.g., when switching back to move_base), exit direct navigation
+                    self.use_direct_navigation = False
+                    return
+                
                 distance = norm(self.robot_pose - self.direct_nav_goal)
                 if distance > MAX_GOAL_DISTANCE * 2:  # Goal is too far, cancel it
                     rospy.logwarn("Auto Explore RRT OpenCV: Direct nav goal too far (%.2f m), canceling and will assign new goal", distance)
