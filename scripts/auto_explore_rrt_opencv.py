@@ -35,11 +35,13 @@ FREE = 0
 OCCUPIED = 100
 
 # Information gain parameters (from ros_autonomous_slam/scripts/assigner.py)
-INFO_RADIUS = 1.0  # meters - radius for information gain calculation
-INFO_MULTIPLIER = 3.0  # Multiplier for information gain in revenue calculation
+INFO_RADIUS = 1.5  # meters - radius for information gain calculation (increased to see more unexplored area)
+INFO_MULTIPLIER = 5.0  # Multiplier for information gain in revenue calculation (increased to prioritize unexplored areas)
 HYSTERESIS_RADIUS = 3.0  # meters - radius for hysteresis (bias to continue exploring)
 HYSTERESIS_GAIN = 2.0  # Gain multiplier when within hysteresis radius
 COSTMAP_CLEARING_THRESHOLD = 70  # Threshold for costmap clearing
+UNEXPLORED_BONUS_RADIUS = 2.0  # meters - bonus for goals near unexplored areas
+UNEXPLORED_BONUS_MULTIPLIER = 1.5  # Bonus multiplier for goals near unexplored areas
 
 # Exploration parameters
 RATE_HZ = 10.0  # Hz - main loop rate (matching assigner.py)
@@ -428,10 +430,13 @@ class AutoExploreRRTOpenCV:
         free_pct = float(np.sum((map_array == FREE) | ((map_array > 0) & (map_array < 50)))) / len(map_array)
         
         # Determine exploration radius based on map coverage
+        # Increased radii to explore larger areas and reach unexplored regions
         if free_pct < 0.05:  # Map is mostly unknown
-            exploration_radius = 2.0  # Smaller radius for early exploration
+            exploration_radius = 3.0  # Increased from 2.0 for better early exploration
+        elif free_pct < 0.20:  # Map is partially explored
+            exploration_radius = 6.0  # Medium radius for mid-exploration
         else:
-            exploration_radius = 5.0  # Larger radius for later exploration
+            exploration_radius = 8.0  # Larger radius for later exploration (increased from 5.0)
         
         robot_x, robot_y = self.robot_pose
         robot_grid_x = int((robot_x - origin_x) / resolution)
@@ -439,8 +444,15 @@ class AutoExploreRRTOpenCV:
         
         for _ in range(num_samples):
             # Sample random point within exploration radius
+            # Bias sampling toward areas with more unknown space (for better exploration)
             angle = random.uniform(0, 2 * math.pi)
+            # Use exponential distribution to bias toward farther points (explore more area)
+            # This helps reach unexplored regions
             distance = random.uniform(0, exploration_radius)
+            # 30% chance to sample from outer half of radius (encourages distant exploration)
+            if random.random() < 0.3:
+                distance = random.uniform(exploration_radius * 0.5, exploration_radius)
+            
             world_x = robot_x + distance * math.cos(angle)
             world_y = robot_y + distance * math.sin(angle)
             
@@ -1209,8 +1221,8 @@ class AutoExploreRRTOpenCV:
             
             # Check if goal has sufficient known free space around it (safety buffer)
             # This prevents selecting goals that are barely in the map or too close to walls
-            SAFETY_BUFFER_RADIUS = 0.5  # meters - require 0.5m radius of known free space
-            MIN_WALL_DISTANCE = 0.4  # meters - minimum distance from walls/occupied cells
+            SAFETY_BUFFER_RADIUS = 0.8  # meters - require 0.8m radius of known free space (increased for better exploration)
+            MIN_WALL_DISTANCE = 0.6  # meters - minimum distance from walls/occupied cells (increased to stay away from walls)
             buffer_radius_grid = int(SAFETY_BUFFER_RADIUS / resolution)
             
             candidate_x, candidate_y = candidate
@@ -1245,10 +1257,10 @@ class AutoExploreRRTOpenCV:
                                 dist_to_wall = math.sqrt(dist_sq) * resolution
                                 min_wall_distance = min(min_wall_distance, dist_to_wall)
                 
-                # Require at least 60% of neighbors to be known free space
+                # Require at least 70% of neighbors to be known free space (increased for better exploration)
                 if total_neighbors > 0:
                     free_ratio = float(free_neighbors) / total_neighbors
-                    if free_ratio < 0.6:
+                    if free_ratio < 0.7:
                         has_sufficient_space = False
                         rospy.logdebug("Auto Explore RRT OpenCV: Candidate (%.2f, %.2f) rejected - insufficient known space (%.1f%% free)", 
                                      candidate_x, candidate_y, free_ratio * 100)
@@ -1262,11 +1274,11 @@ class AutoExploreRRTOpenCV:
                 # Add penalty based on proximity to walls (even if not too close)
                 if min_wall_distance < float('inf'):
                     # Penalty increases as we get closer to walls
-                    # At MIN_WALL_DISTANCE, penalty is 50% of information gain
-                    # At 2*MIN_WALL_DISTANCE, penalty is 0%
-                    if min_wall_distance < 2 * MIN_WALL_DISTANCE:
-                        wall_penalty_factor = 1.0 - (min_wall_distance / (2 * MIN_WALL_DISTANCE))
-                        wall_penalty = wall_penalty_factor * 0.5  # Up to 50% penalty
+                    # At MIN_WALL_DISTANCE, penalty is 70% of information gain (increased to strongly discourage wall proximity)
+                    # At 3*MIN_WALL_DISTANCE, penalty is 0% (increased range for smoother penalty)
+                    if min_wall_distance < 3 * MIN_WALL_DISTANCE:
+                        wall_penalty_factor = 1.0 - (min_wall_distance / (3 * MIN_WALL_DISTANCE))
+                        wall_penalty = wall_penalty_factor * 0.7  # Up to 70% penalty (increased from 50%)
             
             # Skip candidates without sufficient known space or too close to walls (too risky)
             if not has_sufficient_space or too_close_to_wall:
@@ -1278,13 +1290,41 @@ class AutoExploreRRTOpenCV:
             if distance <= HYSTERESIS_RADIUS:
                 information_gain *= HYSTERESIS_GAIN
             
+            # Calculate bonus for being near unexplored areas (encourages exploration of entire world)
+            unexplored_bonus = 0.0
+            if self.map_data is not None and self.map_info is not None:
+                # Count unknown cells near the candidate point
+                unexplored_radius_grid = int(UNEXPLORED_BONUS_RADIUS / resolution)
+                unexplored_count = 0
+                total_count = 0
+                
+                for dx in range(-unexplored_radius_grid, unexplored_radius_grid + 1):
+                    for dy in range(-unexplored_radius_grid, unexplored_radius_grid + 1):
+                        dist_sq = dx*dx + dy*dy
+                        if dist_sq > unexplored_radius_grid * unexplored_radius_grid:
+                            continue
+                        
+                        nx, ny = grid_x + dx, grid_y + dy
+                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                            total_count += 1
+                            neighbor_value = map_array[ny, nx]
+                            if neighbor_value == UNKNOWN:
+                                unexplored_count += 1
+                
+                # Bonus proportional to percentage of unexplored area nearby
+                if total_count > 0:
+                    unexplored_ratio = float(unexplored_count) / total_count
+                    # Bonus increases with more unexplored area nearby
+                    unexplored_bonus = unexplored_ratio * UNEXPLORED_BONUS_MULTIPLIER * information_gain
+            
             # Apply wall proximity penalty (reduces revenue for goals near walls)
             # This prevents selecting goals that are too close to walls
             penalized_ig = information_gain * (1.0 - wall_penalty)
             
-            # Revenue = information gain * multiplier - distance cost
+            # Revenue = information gain * multiplier + unexplored bonus - distance cost
             # Penalized information gain is used to reduce preference for goals near walls
-            revenue = penalized_ig * INFO_MULTIPLIER - distance
+            # Unexplored bonus encourages exploration of entire world
+            revenue = penalized_ig * INFO_MULTIPLIER + unexplored_bonus - distance
             revenues.append(revenue)
         
         # Select and assign goal based on revenue
