@@ -5,7 +5,11 @@
   <arg name="scan_topic" default="scan"/>
   
   <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
-      
+    <!-- Use raw /odom topic (gmapping needs odometry topic in addition to TF) -->
+    <!-- TF transform (odom->base_footprint) is provided by ekf_odom_to_tf converter -->
+    <!-- This gives gmapping both TF and topic, which some versions require -->
+    <remap from="odom" to="/odom"/>
+    
     <!-- Remap scan topic -->
     <remap from="scan" to="$(arg scan_topic)"/>
     
