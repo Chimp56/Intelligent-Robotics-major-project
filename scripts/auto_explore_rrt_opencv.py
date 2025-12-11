@@ -35,11 +35,13 @@ FREE = 0
 OCCUPIED = 100
 
 # Information gain parameters (from ros_autonomous_slam/scripts/assigner.py)
-INFO_RADIUS = 1.0  # meters - radius for information gain calculation
-INFO_MULTIPLIER = 3.0  # Multiplier for information gain in revenue calculation
+INFO_RADIUS = 1.5  # meters - radius for information gain calculation (increased to see more unexplored area)
+INFO_MULTIPLIER = 5.0  # Multiplier for information gain in revenue calculation (increased to prioritize unexplored areas)
 HYSTERESIS_RADIUS = 3.0  # meters - radius for hysteresis (bias to continue exploring)
 HYSTERESIS_GAIN = 2.0  # Gain multiplier when within hysteresis radius
 COSTMAP_CLEARING_THRESHOLD = 70  # Threshold for costmap clearing
+UNEXPLORED_BONUS_RADIUS = 2.0  # meters - bonus for goals near unexplored areas
+UNEXPLORED_BONUS_MULTIPLIER = 1.5  # Bonus multiplier for goals near unexplored areas
 
 # Exploration parameters
 RATE_HZ = 10.0  # Hz - main loop rate (matching assigner.py)
@@ -101,8 +103,12 @@ class AutoExploreRRTOpenCV:
         self.last_robot_position = None  # Track robot position for stuck detection
         self.stuck_check_time = None
         self.move_base_failure_count = 0  # Track consecutive move_base failures
+        self.current_goal_failure_count = 0  # Track failures for current goal (reset when new goal assigned)
+        self.failed_goal = None  # Track which goal is failing (to detect if same goal fails multiple times)
         self.use_direct_navigation = False  # Fallback to direct navigation when move_base fails
         self.direct_nav_goal = None  # Current direct navigation goal
+        self.direct_nav_start_time = None  # When direct navigation started
+        self.direct_nav_start_position = None  # Robot position when direct navigation started
         
         # Wander mode for early exploration
         self.wander_mode = False
@@ -202,16 +208,41 @@ class AutoExploreRRTOpenCV:
                     # Reset direct navigation state
                     self.use_direct_navigation = False
                     self.direct_nav_goal = None
+                    self.direct_nav_start_time = None
+                    self.direct_nav_start_position = None
                     self.move_base_failure_count = 0
-                    # Stop any current motion
+                    self.current_goal_failure_count = 0  # Reset failure count for new goal
+                    self.failed_goal = None
+                    # Reset goal tracking state
+                    self.goal_start_time = None
+                    self.last_robot_position = None
+                    self.stuck_check_time = None
+                    # Stop any current motion (publish multiple times to clear any lingering teleop commands)
                     twist = Twist()
-                    self.cmd_vel_pub.publish(twist)
+                    for _ in range(3):
+                        self.cmd_vel_pub.publish(twist)
+                        rospy.sleep(0.1)
+                    # Cancel any move_base goals
                     if self.use_simple_interface:
                         # For simple interface, just clear assigned point
                         self.assigned_point = None
                     elif self.move_base_client is not None:
-                        self.move_base_client.cancel_all_goals()
-                    rospy.loginfo("Auto Explore RRT OpenCV: Starting continuous exploration (reset all navigation state)")
+                        try:
+                            self.move_base_client.cancel_all_goals()
+                        except:
+                            pass
+                    # Clear costmaps to remove any stale planning data from teleop
+                    if self.clear_local_costmap is not None:
+                        try:
+                            self.clear_local_costmap()
+                        except:
+                            pass
+                    if self.clear_global_costmap is not None:
+                        try:
+                            self.clear_global_costmap()
+                        except:
+                            pass
+                    rospy.loginfo("Auto Explore RRT OpenCV: Starting continuous exploration (reset all navigation state from MANUAL)")
                 else:
                     self.exploring = False
                     if self.use_simple_interface:
@@ -426,10 +457,13 @@ class AutoExploreRRTOpenCV:
         free_pct = float(np.sum((map_array == FREE) | ((map_array > 0) & (map_array < 50)))) / len(map_array)
         
         # Determine exploration radius based on map coverage
+        # Increased radii to explore larger areas and reach unexplored regions
         if free_pct < 0.05:  # Map is mostly unknown
-            exploration_radius = 2.0  # Smaller radius for early exploration
+            exploration_radius = 3.0  # Increased from 2.0 for better early exploration
+        elif free_pct < 0.20:  # Map is partially explored
+            exploration_radius = 6.0  # Medium radius for mid-exploration
         else:
-            exploration_radius = 5.0  # Larger radius for later exploration
+            exploration_radius = 8.0  # Larger radius for later exploration (increased from 5.0)
         
         robot_x, robot_y = self.robot_pose
         robot_grid_x = int((robot_x - origin_x) / resolution)
@@ -437,8 +471,15 @@ class AutoExploreRRTOpenCV:
         
         for _ in range(num_samples):
             # Sample random point within exploration radius
+            # Bias sampling toward areas with more unknown space (for better exploration)
             angle = random.uniform(0, 2 * math.pi)
+            # Use exponential distribution to bias toward farther points (explore more area)
+            # This helps reach unexplored regions
             distance = random.uniform(0, exploration_radius)
+            # 30% chance to sample from outer half of radius (encourages distant exploration)
+            if random.random() < 0.3:
+                distance = random.uniform(exploration_radius * 0.5, exploration_radius)
+            
             world_x = robot_x + distance * math.cos(angle)
             world_y = robot_y + distance * math.sin(angle)
             
@@ -677,6 +718,13 @@ class AutoExploreRRTOpenCV:
                 # Set stuck_check_time to None initially, it will be set when we first check movement
                 self.stuck_check_time = None
                 
+                # Track current goal for failure counting
+                current_goal_key = (world_x, world_y)
+                if self.failed_goal != current_goal_key:
+                    # New goal - reset failure count for this goal
+                    self.current_goal_failure_count = 0
+                    self.failed_goal = current_goal_key
+                
                 rospy.loginfo("Auto Explore RRT OpenCV: Assigned goal (%.2f, %.2f)", world_x, world_y)
                 
                 # Wait a bit to see if goal was accepted (like ros_autonomous_slam)
@@ -684,16 +732,38 @@ class AutoExploreRRTOpenCV:
                 state = self.move_base_client.get_state()
                 
                 if state == GoalStatus.REJECTED:
-                    rospy.logwarn("Auto Explore RRT OpenCV: Goal rejected by move_base (failure count: %d)", self.move_base_failure_count + 1)
                     self.move_base_failure_count += 1
+                    self.current_goal_failure_count += 1
+                    rospy.logwarn("Auto Explore RRT OpenCV: Goal rejected by move_base (total failures: %d, this goal failures: %d)", 
+                                self.move_base_failure_count, self.current_goal_failure_count)
+                    
+                    # After 5 failures for the same goal, choose a new candidate
+                    if self.current_goal_failure_count >= 5:
+                        rospy.logwarn("Auto Explore RRT OpenCV: Goal (%.2f, %.2f) failed %d times, choosing new candidate", 
+                                    world_x, world_y, self.current_goal_failure_count)
+                        self.assigned_point = None
+                        self.goal_start_time = None
+                        self.failed_goal = None
+                        self.current_goal_failure_count = 0
+                        # Cancel any pending goals
+                        try:
+                            self.move_base_client.cancel_all_goals()
+                        except:
+                            pass
+                        # Return to exploration loop to select new goal
+                        return
+                    
                     self.assigned_point = None
                     self.goal_start_time = None
                     
-                    # After 2 consecutive failures, switch to direct navigation (reduced from 3 for faster fallback)
+                    # After 2 consecutive failures (any goal), switch to direct navigation (reduced from 3 for faster fallback)
                     if self.move_base_failure_count >= 2:
                         rospy.logwarn("Auto Explore RRT OpenCV: move_base failed %d times consecutively, switching to direct navigation", 
                                     self.move_base_failure_count)
                         self.use_direct_navigation = True
+                        # Initialize direct navigation tracking
+                        self.direct_nav_start_time = rospy.Time.now()
+                        self.direct_nav_start_position = self.robot_pose.copy() if self.robot_pose is not None else None
                         # Cancel any pending goals
                         try:
                             self.move_base_client.cancel_all_goals()
@@ -702,6 +772,8 @@ class AutoExploreRRTOpenCV:
                 elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                     rospy.loginfo("Auto Explore RRT OpenCV: Goal accepted")
                     self.move_base_failure_count = 0  # Reset on success
+                    self.current_goal_failure_count = 0  # Reset failure count for this goal
+                    self.failed_goal = None  # Clear failed goal tracking
                     self.use_direct_navigation = False  # Reset direct navigation flag
         except Exception as e:
             rospy.logerr("Auto Explore RRT OpenCV: Failed to send goal: %s", str(e))
@@ -780,6 +852,9 @@ class AutoExploreRRTOpenCV:
                                         pass
                                     self.use_direct_navigation = True
                                     self.direct_nav_goal = self.assigned_point.copy()
+                                    # Initialize direct navigation tracking
+                                    self.direct_nav_start_time = rospy.Time.now()
+                                    self.direct_nav_start_position = self.robot_pose.copy() if self.robot_pose is not None else None
                                     rospy.loginfo("Auto Explore RRT OpenCV: Switching to direct navigation for stuck goal at (%.2f, %.2f)", 
                                                 self.assigned_point[0], self.assigned_point[1])
                                 else:
@@ -803,7 +878,7 @@ class AutoExploreRRTOpenCV:
                         self.stuck_check_time = None
                         return True
                 elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
-                    # Goal completed or failed
+                    # Goal completed or failed - clear state and return False (not a timeout, goal is done)
                     state_names = {
                         GoalStatus.SUCCEEDED: "SUCCEEDED",
                         GoalStatus.ABORTED: "ABORTED",
@@ -813,13 +888,56 @@ class AutoExploreRRTOpenCV:
                     }
                     state_name = state_names.get(state, "UNKNOWN")
                     elapsed = (rospy.Time.now() - self.goal_start_time).to_sec() if self.goal_start_time else 0
-                    rospy.loginfo("Auto Explore RRT OpenCV: Goal completed with status %d (%s) after %.1f seconds", 
-                                 state, state_name, elapsed)
+                    
+                    # Track failures for this specific goal
+                    if state in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                        # Goal failed - increment failure count for this goal
+                        if self.assigned_point is not None:
+                            current_goal_key = (self.assigned_point[0], self.assigned_point[1])
+                            if self.failed_goal == current_goal_key:
+                                # Same goal failing again
+                                self.current_goal_failure_count += 1
+                            else:
+                                # New goal failing
+                                self.current_goal_failure_count = 1
+                                self.failed_goal = current_goal_key
+                            
+                            self.move_base_failure_count += 1
+                            
+                            rospy.logwarn("Auto Explore RRT OpenCV: Goal failed with status %d (%s) after %.1f seconds (total failures: %d, this goal failures: %d)", 
+                                         state, state_name, elapsed, self.move_base_failure_count, self.current_goal_failure_count)
+                            
+                            # After 5 failures for the same goal, choose a new candidate
+                            if self.current_goal_failure_count >= 5:
+                                rospy.logwarn("Auto Explore RRT OpenCV: Goal (%.2f, %.2f) failed %d times, choosing new candidate", 
+                                            self.assigned_point[0], self.assigned_point[1], self.current_goal_failure_count)
+                                self.assigned_point = None
+                                self.goal_start_time = None
+                                self.failed_goal = None
+                                self.current_goal_failure_count = 0
+                                self.last_robot_position = None
+                                self.stuck_check_time = None
+                                self.use_direct_navigation = False
+                                self.direct_nav_goal = None
+                                return False  # Return to exploration loop to select new goal
+                        else:
+                            rospy.logwarn("Auto Explore RRT OpenCV: Goal failed with status %d (%s) after %.1f seconds", 
+                                         state, state_name, elapsed)
+                    else:
+                        # Goal succeeded - reset failure counts
+                        rospy.loginfo("Auto Explore RRT OpenCV: Goal completed with status %d (%s) after %.1f seconds", 
+                                     state, state_name, elapsed)
+                        self.move_base_failure_count = 0
+                        self.current_goal_failure_count = 0
+                        self.failed_goal = None
+                    
                     self.assigned_point = None
                     self.goal_start_time = None
                     self.last_robot_position = None
                     self.stuck_check_time = None
-                    return True
+                    self.use_direct_navigation = False  # Reset direct nav flag
+                    self.direct_nav_goal = None  # Clear direct nav goal
+                    return False  # Return False - goal is done, not a timeout, will be handled by _get_robot_state()
             except Exception as e:
                 rospy.logwarn("Auto Explore RRT OpenCV: Error checking goal status: %s", str(e))
         return False
@@ -962,21 +1080,28 @@ class AutoExploreRRTOpenCV:
             if not self.use_simple_interface and self.move_base_client is not None:
                 try:
                     state = self.move_base_client.get_state()
-                    # Only cancel if move_base is not actively navigating
-                    # If move_base is working, let it handle navigation
+                    # Only check if move_base is active - if it's not active, we can use direct navigation
                     if state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                         # Check if robot is actually moving (move_base might be working)
+                        # Only disable direct navigation if move_base is making clear progress
                         if self.robot_pose is not None and self.last_robot_position is not None:
                             distance_moved = norm(self.robot_pose - self.last_robot_position)
-                            # If robot moved more than 5cm, move_base is probably working
-                            if distance_moved > 0.05:
+                            # If robot moved more than 10cm in the last iteration, move_base is probably working
+                            if distance_moved > 0.10:
                                 # move_base is working, disable direct navigation
-                                rospy.loginfo("Auto Explore RRT OpenCV: move_base is working, disabling direct navigation")
+                                rospy.loginfo("Auto Explore RRT OpenCV: move_base is working (moved %.3f m), disabling direct navigation", distance_moved)
                                 self.use_direct_navigation = False
                                 self.direct_nav_goal = None
+                                # Update last position for next check
+                                self.last_robot_position = self.robot_pose.copy()
                                 return  # Let move_base handle navigation
-                        
-                        # Only cancel if move_base is truly stuck
+                        # If move_base is active but robot isn't moving much, keep using direct navigation
+                        # Don't cancel move_base here - let it try, but we'll use direct navigation as backup
+                    elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                        # move_base goal is done, we can continue with direct navigation
+                        pass
+                    else:
+                        # move_base has no active goal, cancel any lingering goals and clear costmaps
                         self.move_base_client.cancel_all_goals()
                         # Clear costmaps to stop move_base from trying to plan
                         if self.clear_local_costmap is not None:
@@ -993,7 +1118,62 @@ class AutoExploreRRTOpenCV:
                     pass
             
             if self.direct_nav_goal is not None and self.robot_pose is not None:
+                # Initialize direct navigation tracking if not set
+                if self.direct_nav_start_time is None:
+                    self.direct_nav_start_time = rospy.Time.now()
+                    self.direct_nav_start_position = self.robot_pose.copy()
+                
+                # Check if direct navigation is stuck (not making progress)
+                # Only check if we have valid tracking data
+                if self.direct_nav_start_time is not None and self.direct_nav_start_position is not None:
+                    direct_nav_elapsed = (rospy.Time.now() - self.direct_nav_start_time).to_sec()
+                    if direct_nav_elapsed > 5.0:  # After 5 seconds, check if we're making progress
+                        distance_moved = norm(self.robot_pose - self.direct_nav_start_position)
+                        if distance_moved < 0.15:  # Moved less than 15cm in 5+ seconds
+                            # Direct navigation is stuck, try move_base again
+                            rospy.logwarn("Auto Explore RRT OpenCV: Direct navigation stuck (moved %.3f m in %.1f s), switching back to move_base", 
+                                        distance_moved, direct_nav_elapsed)
+                            # Stop direct navigation
+                            twist = Twist()
+                            self.cmd_vel_pub.publish(twist)
+                            # Clear direct navigation state
+                            self.use_direct_navigation = False
+                            self.direct_nav_goal = None
+                            self.direct_nav_start_time = None
+                            self.direct_nav_start_position = None
+                            # Reset move_base failure count to give it another chance
+                            self.move_base_failure_count = 0
+                            # Cancel any lingering move_base goals
+                            if not self.use_simple_interface and self.move_base_client is not None:
+                                try:
+                                    self.move_base_client.cancel_all_goals()
+                                except:
+                                    pass
+                            # Clear costmaps
+                            if self.clear_local_costmap is not None:
+                                try:
+                                    self.clear_local_costmap()
+                                except:
+                                    pass
+                            if self.clear_global_costmap is not None:
+                                try:
+                                    self.clear_global_costmap()
+                                except:
+                                    pass
+                            # Return immediately to let exploration logic try move_base again
+                            return
+                    else:
+                        # Making progress, reset tracking
+                        self.direct_nav_start_time = rospy.Time.now()
+                        self.direct_nav_start_position = self.robot_pose.copy()
+                
                 # Check if goal is still valid (not too far away)
+                # Re-check that direct_nav_goal is still valid (it might have been cleared above)
+                if self.direct_nav_goal is None:
+                    # Goal was cleared (e.g., when switching back to move_base), exit direct navigation
+                    self.use_direct_navigation = False
+                    return
+                
                 distance = norm(self.robot_pose - self.direct_nav_goal)
                 if distance > MAX_GOAL_DISTANCE * 2:  # Goal is too far, cancel it
                     rospy.logwarn("Auto Explore RRT OpenCV: Direct nav goal too far (%.2f m), canceling and will assign new goal", distance)
@@ -1003,7 +1183,11 @@ class AutoExploreRRTOpenCV:
                     self.last_robot_position = None  # Reset position tracking
                     self.stuck_check_time = None  # Reset stuck check
                     self.use_direct_navigation = False
+                    self.direct_nav_start_time = None
+                    self.direct_nav_start_position = None
                     self.move_base_failure_count = 0  # Reset failure count to try move_base again
+                    self.current_goal_failure_count = 0  # Reset failure count for new goal
+                    self.failed_goal = None
                     # Cancel any move_base goals
                     if not self.use_simple_interface and self.move_base_client is not None:
                         try:
@@ -1040,6 +1224,23 @@ class AutoExploreRRTOpenCV:
         # Check if we should do initial rotation when starting (do this first)
         if not self.initial_rotation_done:
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Performing initial rotation...")
+            # Ensure move_base is stopped before starting rotation
+            if not self.use_simple_interface and self.move_base_client is not None:
+                try:
+                    self.move_base_client.cancel_all_goals()
+                    # Clear costmaps to stop move_base from publishing
+                    if self.clear_local_costmap is not None:
+                        try:
+                            self.clear_local_costmap()
+                        except:
+                            pass
+                    if self.clear_global_costmap is not None:
+                        try:
+                            self.clear_global_costmap()
+                        except:
+                            pass
+                except:
+                    pass
             self._perform_initial_rotation()
             return
         
@@ -1135,8 +1336,8 @@ class AutoExploreRRTOpenCV:
             
             # Check if goal has sufficient known free space around it (safety buffer)
             # This prevents selecting goals that are barely in the map or too close to walls
-            SAFETY_BUFFER_RADIUS = 0.5  # meters - require 0.5m radius of known free space
-            MIN_WALL_DISTANCE = 0.4  # meters - minimum distance from walls/occupied cells
+            SAFETY_BUFFER_RADIUS = 0.8  # meters - require 0.8m radius of known free space (increased for better exploration)
+            MIN_WALL_DISTANCE = 0.6  # meters - minimum distance from walls/occupied cells (increased to stay away from walls)
             buffer_radius_grid = int(SAFETY_BUFFER_RADIUS / resolution)
             
             candidate_x, candidate_y = candidate
@@ -1171,10 +1372,10 @@ class AutoExploreRRTOpenCV:
                                 dist_to_wall = math.sqrt(dist_sq) * resolution
                                 min_wall_distance = min(min_wall_distance, dist_to_wall)
                 
-                # Require at least 60% of neighbors to be known free space
+                # Require at least 70% of neighbors to be known free space (increased for better exploration)
                 if total_neighbors > 0:
                     free_ratio = float(free_neighbors) / total_neighbors
-                    if free_ratio < 0.6:
+                    if free_ratio < 0.7:
                         has_sufficient_space = False
                         rospy.logdebug("Auto Explore RRT OpenCV: Candidate (%.2f, %.2f) rejected - insufficient known space (%.1f%% free)", 
                                      candidate_x, candidate_y, free_ratio * 100)
@@ -1188,11 +1389,11 @@ class AutoExploreRRTOpenCV:
                 # Add penalty based on proximity to walls (even if not too close)
                 if min_wall_distance < float('inf'):
                     # Penalty increases as we get closer to walls
-                    # At MIN_WALL_DISTANCE, penalty is 50% of information gain
-                    # At 2*MIN_WALL_DISTANCE, penalty is 0%
-                    if min_wall_distance < 2 * MIN_WALL_DISTANCE:
-                        wall_penalty_factor = 1.0 - (min_wall_distance / (2 * MIN_WALL_DISTANCE))
-                        wall_penalty = wall_penalty_factor * 0.5  # Up to 50% penalty
+                    # At MIN_WALL_DISTANCE, penalty is 70% of information gain (increased to strongly discourage wall proximity)
+                    # At 3*MIN_WALL_DISTANCE, penalty is 0% (increased range for smoother penalty)
+                    if min_wall_distance < 3 * MIN_WALL_DISTANCE:
+                        wall_penalty_factor = 1.0 - (min_wall_distance / (3 * MIN_WALL_DISTANCE))
+                        wall_penalty = wall_penalty_factor * 0.7  # Up to 70% penalty (increased from 50%)
             
             # Skip candidates without sufficient known space or too close to walls (too risky)
             if not has_sufficient_space or too_close_to_wall:
@@ -1204,13 +1405,41 @@ class AutoExploreRRTOpenCV:
             if distance <= HYSTERESIS_RADIUS:
                 information_gain *= HYSTERESIS_GAIN
             
+            # Calculate bonus for being near unexplored areas (encourages exploration of entire world)
+            unexplored_bonus = 0.0
+            if self.map_data is not None and self.map_info is not None:
+                # Count unknown cells near the candidate point
+                unexplored_radius_grid = int(UNEXPLORED_BONUS_RADIUS / resolution)
+                unexplored_count = 0
+                total_count = 0
+                
+                for dx in range(-unexplored_radius_grid, unexplored_radius_grid + 1):
+                    for dy in range(-unexplored_radius_grid, unexplored_radius_grid + 1):
+                        dist_sq = dx*dx + dy*dy
+                        if dist_sq > unexplored_radius_grid * unexplored_radius_grid:
+                            continue
+                        
+                        nx, ny = grid_x + dx, grid_y + dy
+                        if 0 <= nx < self.map_info.width and 0 <= ny < self.map_info.height:
+                            total_count += 1
+                            neighbor_value = map_array[ny, nx]
+                            if neighbor_value == UNKNOWN:
+                                unexplored_count += 1
+                
+                # Bonus proportional to percentage of unexplored area nearby
+                if total_count > 0:
+                    unexplored_ratio = float(unexplored_count) / total_count
+                    # Bonus increases with more unexplored area nearby
+                    unexplored_bonus = unexplored_ratio * UNEXPLORED_BONUS_MULTIPLIER * information_gain
+            
             # Apply wall proximity penalty (reduces revenue for goals near walls)
             # This prevents selecting goals that are too close to walls
             penalized_ig = information_gain * (1.0 - wall_penalty)
             
-            # Revenue = information gain * multiplier - distance cost
+            # Revenue = information gain * multiplier + unexplored bonus - distance cost
             # Penalized information gain is used to reduce preference for goals near walls
-            revenue = penalized_ig * INFO_MULTIPLIER - distance
+            # Unexplored bonus encourages exploration of entire world
+            revenue = penalized_ig * INFO_MULTIPLIER + unexplored_bonus - distance
             revenues.append(revenue)
         
         # Select and assign goal based on revenue
@@ -1281,6 +1510,9 @@ class AutoExploreRRTOpenCV:
         if self.initial_rotation_start_time is None:
             self.initial_rotation_start_time = rospy.Time.now()
             rospy.loginfo("Auto Explore RRT OpenCV: Starting initial 2-revolution scan...")
+            # Initialize last yaw immediately if available
+            if self.robot_yaw is not None:
+                self.last_odom_yaw = self.robot_yaw
         
         # Target: 2 full rotations = 4pi radians
         self.initial_rotation_target = 4 * math.pi
@@ -1289,7 +1521,7 @@ class AutoExploreRRTOpenCV:
         if self.robot_yaw is not None:
             current_yaw = self.robot_yaw
             
-            # Initialize last yaw on first call
+            # Initialize last yaw on first call (if not already initialized)
             if self.last_odom_yaw is None:
                 self.last_odom_yaw = current_yaw
             else:
@@ -1325,19 +1557,44 @@ class AutoExploreRRTOpenCV:
             return
         
         # Rotate counter-clockwise at moderate speed (ALWAYS publish, even if tracking not ready)
+        # Publish multiple times to ensure command gets through cmd_vel mux
+        # This is important because move_base or other nodes might be publishing zero velocity
         twist = Twist()
         twist.linear.x = 0.0
         twist.angular.z = 0.4  # 0.4 rad/s rotation speed
-        self.cmd_vel_pub.publish(twist)
-        rospy.logdebug_throttle(1, "Auto Explore RRT OpenCV: Publishing rotation command (angular.z=%.2f)", twist.angular.z)
+        # Publish 3 times to ensure it overrides any lingering commands
+        for _ in range(3):
+            self.cmd_vel_pub.publish(twist)
         
-        # Log progress
-        if self.last_odom_yaw is not None:
+        # Also ensure move_base is not publishing (cancel all goals and clear costmaps)
+        if not self.use_simple_interface and self.move_base_client is not None:
+            try:
+                # Cancel any active goals
+                self.move_base_client.cancel_all_goals()
+                # Clear costmaps to stop move_base from planning/publishing
+                if self.clear_local_costmap is not None:
+                    try:
+                        self.clear_local_costmap()
+                    except:
+                        pass
+                if self.clear_global_costmap is not None:
+                    try:
+                        self.clear_global_costmap()
+                    except:
+                        pass
+            except:
+                pass
+        
+        # Log progress (show time-based progress if yaw tracking not available)
+        if self.last_odom_yaw is not None and self.initial_rotation_accumulated > 0:
             progress_pct = (self.initial_rotation_accumulated / self.initial_rotation_target) * 100
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Initial rotation progress: %.1f%% (%.1f degrees / 720 degrees)", 
                                   progress_pct, math.degrees(self.initial_rotation_accumulated))
         else:
-            rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Initial rotation in progress (waiting for odometry)...")
+            # Show time-based progress if yaw tracking not working yet
+            time_progress_pct = min(100.0, (elapsed_time / rotation_time_needed) * 100)
+            rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Initial rotation in progress (time-based: %.1f%%, %.1f s / %.1f s)", 
+                                  time_progress_pct, elapsed_time, rotation_time_needed)
     
     def _perform_wander_exploration(self):
         """
@@ -1509,7 +1766,9 @@ class AutoExploreRRTOpenCV:
             return False
         
         min_distance = min(front_ranges)
-        MIN_OBSTACLE_DISTANCE = 0.5  # 50cm threshold
+        # Increased safety distance to prevent collisions
+        # Use 0.6m for normal checks (was 0.5m) to give more buffer
+        MIN_OBSTACLE_DISTANCE = 0.6  # 60cm threshold (increased from 50cm for safety)
         
         # Check if obstacle is too close
         if min_distance < MIN_OBSTACLE_DISTANCE:
@@ -1621,15 +1880,37 @@ class AutoExploreRRTOpenCV:
         while angle_diff < -math.pi:
             angle_diff += 2 * math.pi
         
-        # Check for obstacles (use narrower cone when turning to allow turns near walls)
+        # ALWAYS check for obstacles before any movement
+        # Use narrower cone when turning to allow turns near walls
         abs_angle_diff = abs(angle_diff)
         is_turning = abs_angle_diff > math.radians(15)  # More than 15 degrees off
         
         if is_turning:
-            # When turning, use narrower obstacle check to allow turning near side walls
-            obstacle_ahead = self._check_obstacle_ahead(check_sides=True)
+            # When turning, be very permissive - only check a very narrow cone directly ahead
+            # This allows turning in corners and near walls without getting stuck
+            if self.laser_data is not None and self.laser_data.ranges:
+                ranges = self.laser_data.ranges
+                angle_min = self.laser_data.angle_min
+                angle_increment = self.laser_data.angle_increment
+                # Very narrow cone (10 degrees) when turning - we're not moving forward
+                narrow_angle = math.radians(10)
+                
+                narrow_ranges = []
+                for i in range(len(ranges)):
+                    angle = angle_min + i * angle_increment
+                    if abs(angle) <= narrow_angle and ranges[i] > 0 and not math.isnan(ranges[i]):
+                        narrow_ranges.append(ranges[i])
+                
+                if narrow_ranges:
+                    min_narrow_distance = min(narrow_ranges)
+                    # Only consider it an obstacle if VERY close (30cm) when turning
+                    obstacle_ahead = min_narrow_distance < 0.3
+                else:
+                    obstacle_ahead = False
+            else:
+                obstacle_ahead = False
         else:
-            # When moving forward, use normal obstacle check
+            # When moving forward, use normal obstacle check (stricter)
             obstacle_ahead = self._check_obstacle_ahead(check_sides=False)
         
         # If close enough, stop
@@ -1646,26 +1927,40 @@ class AutoExploreRRTOpenCV:
             self.goal_start_time = None  # Clear goal start time
             self.last_robot_position = None  # Reset position tracking
             self.stuck_check_time = None  # Reset stuck check
+            self.direct_nav_start_time = None  # Clear direct nav tracking
+            self.direct_nav_start_position = None
             twist = Twist()
             self.cmd_vel_pub.publish(twist)
             # Reset move_base failure count on success
             self.move_base_failure_count = 0
+            self.current_goal_failure_count = 0  # Reset failure count for this goal
+            self.failed_goal = None
             self.use_direct_navigation = False
             # Don't sleep - return immediately so exploration loop can assign new goal on next iteration
             return
         
-        # IMPORTANT: Check if move_base is active and has a valid plan before using direct navigation
+        # IMPORTANT: Check if move_base is active and making progress before using direct navigation
         # If move_base is working, let it handle navigation instead of direct navigation
         if not self.use_simple_interface and self.move_base_client is not None:
             try:
                 state = self.move_base_client.get_state()
                 if state == GoalStatus.ACTIVE:
-                    # move_base is active and has a plan - let it handle navigation
-                    # Don't interfere with move_base's path planning
-                    rospy.loginfo_throttle(5.0, "Auto Explore RRT OpenCV: move_base is active with a plan, disabling direct navigation")
-                    self.use_direct_navigation = False
-                    self.direct_nav_goal = None
-                    return  # Let move_base handle navigation
+                    # Check if robot is actually moving (move_base might be working)
+                    if self.robot_pose is not None and self.last_robot_position is not None:
+                        distance_moved = norm(self.robot_pose - self.last_robot_position)
+                        # If robot moved more than 10cm, move_base is probably working
+                        if distance_moved > 0.10:
+                            # move_base is working, disable direct navigation
+                            rospy.loginfo_throttle(5.0, "Auto Explore RRT OpenCV: move_base is active and making progress (moved %.3f m), disabling direct navigation", distance_moved)
+                            self.use_direct_navigation = False
+                            self.direct_nav_goal = None
+                            # Update last position for next check
+                            self.last_robot_position = self.robot_pose.copy()
+                            return  # Let move_base handle navigation
+                    # If move_base is active but robot isn't moving much, continue with direct navigation as backup
+                elif state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                    # move_base goal is done, we can continue with direct navigation
+                    pass
             except:
                 pass
         
@@ -1692,6 +1987,46 @@ class AutoExploreRRTOpenCV:
         
         # Turn toward goal if not aligned (allow turning even with side walls)
         if abs(angle_diff) > 0.15:  # ~8.6 degrees (reduced threshold for faster alignment)
+            # When turning, be more permissive about obstacles
+            # Only check a very narrow cone directly ahead (10 degrees) since we're not moving forward
+            # This allows turning in corners and near walls
+            if self.laser_data is not None and self.laser_data.ranges:
+                ranges = self.laser_data.ranges
+                angle_min = self.laser_data.angle_min
+                angle_increment = self.laser_data.angle_increment
+                # Very narrow cone check (10 degrees) - only check directly ahead when turning
+                narrow_angle = math.radians(10)
+                
+                narrow_ranges = []
+                for i in range(len(ranges)):
+                    angle = angle_min + i * angle_increment
+                    if abs(angle) <= narrow_angle and ranges[i] > 0 and not math.isnan(ranges[i]):
+                        narrow_ranges.append(ranges[i])
+                
+                # Only prevent turning if obstacle is VERY close directly ahead (30cm)
+                # This allows turning even when near walls
+                if narrow_ranges:
+                    min_narrow_distance = min(narrow_ranges)
+                    if min_narrow_distance < 0.3:  # Very close obstacle directly ahead
+                        # Obstacle very close directly ahead - turn away from it
+                        rospy.logwarn("Auto Explore RRT OpenCV: Direct nav - very close obstacle directly ahead (%.2f m), turning away", min_narrow_distance)
+                        twist = Twist()
+                        twist.linear.x = 0.0
+                        # Check which side has more space
+                        left_obstacle = self._check_obstacle_on_side('left')
+                        right_obstacle = self._check_obstacle_on_side('right')
+                        
+                        if left_obstacle and not right_obstacle:
+                            twist.angular.z = -0.6  # Turn right (faster to get unstuck)
+                        elif right_obstacle and not left_obstacle:
+                            twist.angular.z = 0.6  # Turn left (faster to get unstuck)
+                        else:
+                            # Turn away from goal if both sides blocked
+                            twist.angular.z = -0.6 if angle_diff > 0 else 0.6  # Turn opposite direction
+                        self.cmd_vel_pub.publish(twist)
+                        return
+            
+            # Safe to turn toward goal (no very close obstacle directly ahead)
             twist = Twist()
             twist.linear.x = 0.0
             # Use proportional control for smoother turning
@@ -1703,10 +2038,62 @@ class AutoExploreRRTOpenCV:
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Direct nav - turning toward goal (angle diff: %.2f rad, speed: %.2f)", 
                                  angle_diff, angular_speed)
         else:
-            # Move forward toward goal
+            # Move forward toward goal - but ALWAYS check for obstacles first
+            # Re-check obstacles right before moving forward (obstacles might have appeared)
+            obstacle_ahead_now = self._check_obstacle_ahead(check_sides=False)
+            
+            if obstacle_ahead_now:
+                # Obstacle detected while trying to move forward - stop and turn away
+                rospy.logwarn("Auto Explore RRT OpenCV: Direct nav - obstacle detected while moving forward, stopping and turning")
+                twist = Twist()
+                twist.linear.x = 0.0
+                # Turn in the direction that avoids the obstacle
+                left_obstacle = self._check_obstacle_on_side('left')
+                right_obstacle = self._check_obstacle_on_side('right')
+                
+                if left_obstacle and not right_obstacle:
+                    twist.angular.z = -0.5  # Turn right
+                elif right_obstacle and not left_obstacle:
+                    twist.angular.z = 0.5  # Turn left
+                else:
+                    # Turn toward goal direction
+                    twist.angular.z = 0.5 if angle_diff > 0 else -0.5
+                self.cmd_vel_pub.publish(twist)
+                return
+            
+            # No obstacle detected - safe to move forward
+            # Get current obstacle distance to adjust speed
+            if self.laser_data is not None and self.laser_data.ranges:
+                ranges = self.laser_data.ranges
+                angle_min = self.laser_data.angle_min
+                angle_increment = self.laser_data.angle_increment
+                front_angle = math.radians(30)  # 30 degrees on each side
+                
+                front_ranges = []
+                for i in range(len(ranges)):
+                    angle = angle_min + i * angle_increment
+                    if abs(angle) <= front_angle and ranges[i] > 0 and not math.isnan(ranges[i]):
+                        front_ranges.append(ranges[i])
+                
+                if front_ranges:
+                    min_obstacle_distance = min(front_ranges)
+                    # Slow down if obstacle is close (within 1.0m)
+                    if min_obstacle_distance < 1.0:
+                        # Reduce speed proportionally as we get closer to obstacles
+                        speed_factor = max(0.3, min_obstacle_distance / 1.0)  # 30% to 100% of normal speed
+                        base_speed = min(0.25, distance * 0.4)
+                        speed = base_speed * speed_factor
+                    else:
+                        # Normal speed when obstacles are far
+                        speed = min(0.25, distance * 0.4)
+                else:
+                    # No laser data in front, be cautious
+                    speed = min(0.15, distance * 0.3)
+            else:
+                # No laser data available, be very cautious
+                speed = min(0.15, distance * 0.3)
+            
             twist = Twist()
-            # Slow down as we approach goal
-            speed = min(0.25, distance * 0.4)  # Slightly faster
             twist.linear.x = speed
             twist.angular.z = 0.2 * angle_diff  # Proportional correction
             self.cmd_vel_pub.publish(twist)
