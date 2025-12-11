@@ -539,7 +539,11 @@ class Controller:
         """Handle IDLE state - robot waits for commands."""
         # Robot is idle, waiting for user commands or state transitions
         rospy.loginfo_throttle(10, "IDLE: Waiting for commands...")
-        self.transition_to(RobotState.MAPPING)
+        
+        # This gives time for all nodes to initialize on launch
+        time_in_idle = (rospy.Time.now() - self.state_entry_time).to_sec()
+        if time_in_idle >= 5.0:
+            self.transition_to(RobotState.MAPPING)
     
     def _handle_mapping(self):
         """Handle MAPPING state - robot explores and builds map."""
