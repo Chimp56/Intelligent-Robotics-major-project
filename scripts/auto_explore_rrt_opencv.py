@@ -103,6 +103,8 @@ class AutoExploreRRTOpenCV:
         self.last_robot_position = None  # Track robot position for stuck detection
         self.stuck_check_time = None
         self.move_base_failure_count = 0  # Track consecutive move_base failures
+        self.current_goal_failure_count = 0  # Track failures for current goal (reset when new goal assigned)
+        self.failed_goal = None  # Track which goal is failing (to detect if same goal fails multiple times)
         self.use_direct_navigation = False  # Fallback to direct navigation when move_base fails
         self.direct_nav_goal = None  # Current direct navigation goal
         self.direct_nav_start_time = None  # When direct navigation started
@@ -207,6 +209,8 @@ class AutoExploreRRTOpenCV:
                     self.use_direct_navigation = False
                     self.direct_nav_goal = None
                     self.move_base_failure_count = 0
+                    self.current_goal_failure_count = 0  # Reset failure count for new goal
+                    self.failed_goal = None
                     # Stop any current motion
                     twist = Twist()
                     self.cmd_vel_pub.publish(twist)
@@ -691,6 +695,13 @@ class AutoExploreRRTOpenCV:
                 # Set stuck_check_time to None initially, it will be set when we first check movement
                 self.stuck_check_time = None
                 
+                # Track current goal for failure counting
+                current_goal_key = (world_x, world_y)
+                if self.failed_goal != current_goal_key:
+                    # New goal - reset failure count for this goal
+                    self.current_goal_failure_count = 0
+                    self.failed_goal = current_goal_key
+                
                 rospy.loginfo("Auto Explore RRT OpenCV: Assigned goal (%.2f, %.2f)", world_x, world_y)
                 
                 # Wait a bit to see if goal was accepted (like ros_autonomous_slam)
@@ -698,12 +709,31 @@ class AutoExploreRRTOpenCV:
                 state = self.move_base_client.get_state()
                 
                 if state == GoalStatus.REJECTED:
-                    rospy.logwarn("Auto Explore RRT OpenCV: Goal rejected by move_base (failure count: %d)", self.move_base_failure_count + 1)
                     self.move_base_failure_count += 1
+                    self.current_goal_failure_count += 1
+                    rospy.logwarn("Auto Explore RRT OpenCV: Goal rejected by move_base (total failures: %d, this goal failures: %d)", 
+                                self.move_base_failure_count, self.current_goal_failure_count)
+                    
+                    # After 5 failures for the same goal, choose a new candidate
+                    if self.current_goal_failure_count >= 5:
+                        rospy.logwarn("Auto Explore RRT OpenCV: Goal (%.2f, %.2f) failed %d times, choosing new candidate", 
+                                    world_x, world_y, self.current_goal_failure_count)
+                        self.assigned_point = None
+                        self.goal_start_time = None
+                        self.failed_goal = None
+                        self.current_goal_failure_count = 0
+                        # Cancel any pending goals
+                        try:
+                            self.move_base_client.cancel_all_goals()
+                        except:
+                            pass
+                        # Return to exploration loop to select new goal
+                        return
+                    
                     self.assigned_point = None
                     self.goal_start_time = None
                     
-                    # After 2 consecutive failures, switch to direct navigation (reduced from 3 for faster fallback)
+                    # After 2 consecutive failures (any goal), switch to direct navigation (reduced from 3 for faster fallback)
                     if self.move_base_failure_count >= 2:
                         rospy.logwarn("Auto Explore RRT OpenCV: move_base failed %d times consecutively, switching to direct navigation", 
                                     self.move_base_failure_count)
@@ -719,6 +749,8 @@ class AutoExploreRRTOpenCV:
                 elif state in [GoalStatus.ACTIVE, GoalStatus.PENDING]:
                     rospy.loginfo("Auto Explore RRT OpenCV: Goal accepted")
                     self.move_base_failure_count = 0  # Reset on success
+                    self.current_goal_failure_count = 0  # Reset failure count for this goal
+                    self.failed_goal = None  # Clear failed goal tracking
                     self.use_direct_navigation = False  # Reset direct navigation flag
         except Exception as e:
             rospy.logerr("Auto Explore RRT OpenCV: Failed to send goal: %s", str(e))
@@ -833,8 +865,49 @@ class AutoExploreRRTOpenCV:
                     }
                     state_name = state_names.get(state, "UNKNOWN")
                     elapsed = (rospy.Time.now() - self.goal_start_time).to_sec() if self.goal_start_time else 0
-                    rospy.loginfo("Auto Explore RRT OpenCV: Goal completed with status %d (%s) after %.1f seconds", 
-                                 state, state_name, elapsed)
+                    
+                    # Track failures for this specific goal
+                    if state in [GoalStatus.ABORTED, GoalStatus.REJECTED, GoalStatus.PREEMPTED, GoalStatus.LOST]:
+                        # Goal failed - increment failure count for this goal
+                        if self.assigned_point is not None:
+                            current_goal_key = (self.assigned_point[0], self.assigned_point[1])
+                            if self.failed_goal == current_goal_key:
+                                # Same goal failing again
+                                self.current_goal_failure_count += 1
+                            else:
+                                # New goal failing
+                                self.current_goal_failure_count = 1
+                                self.failed_goal = current_goal_key
+                            
+                            self.move_base_failure_count += 1
+                            
+                            rospy.logwarn("Auto Explore RRT OpenCV: Goal failed with status %d (%s) after %.1f seconds (total failures: %d, this goal failures: %d)", 
+                                         state, state_name, elapsed, self.move_base_failure_count, self.current_goal_failure_count)
+                            
+                            # After 5 failures for the same goal, choose a new candidate
+                            if self.current_goal_failure_count >= 5:
+                                rospy.logwarn("Auto Explore RRT OpenCV: Goal (%.2f, %.2f) failed %d times, choosing new candidate", 
+                                            self.assigned_point[0], self.assigned_point[1], self.current_goal_failure_count)
+                                self.assigned_point = None
+                                self.goal_start_time = None
+                                self.failed_goal = None
+                                self.current_goal_failure_count = 0
+                                self.last_robot_position = None
+                                self.stuck_check_time = None
+                                self.use_direct_navigation = False
+                                self.direct_nav_goal = None
+                                return False  # Return to exploration loop to select new goal
+                        else:
+                            rospy.logwarn("Auto Explore RRT OpenCV: Goal failed with status %d (%s) after %.1f seconds", 
+                                         state, state_name, elapsed)
+                    else:
+                        # Goal succeeded - reset failure counts
+                        rospy.loginfo("Auto Explore RRT OpenCV: Goal completed with status %d (%s) after %.1f seconds", 
+                                     state, state_name, elapsed)
+                        self.move_base_failure_count = 0
+                        self.current_goal_failure_count = 0
+                        self.failed_goal = None
+                    
                     self.assigned_point = None
                     self.goal_start_time = None
                     self.last_robot_position = None
@@ -1090,6 +1163,8 @@ class AutoExploreRRTOpenCV:
                     self.direct_nav_start_time = None
                     self.direct_nav_start_position = None
                     self.move_base_failure_count = 0  # Reset failure count to try move_base again
+                    self.current_goal_failure_count = 0  # Reset failure count for new goal
+                    self.failed_goal = None
                     # Cancel any move_base goals
                     if not self.use_simple_interface and self.move_base_client is not None:
                         try:
@@ -1790,6 +1865,8 @@ class AutoExploreRRTOpenCV:
             self.cmd_vel_pub.publish(twist)
             # Reset move_base failure count on success
             self.move_base_failure_count = 0
+            self.current_goal_failure_count = 0  # Reset failure count for this goal
+            self.failed_goal = None
             self.use_direct_navigation = False
             # Don't sleep - return immediately so exploration loop can assign new goal on next iteration
             return
