@@ -5,8 +5,7 @@
   <arg name="scan_topic" default="scan"/>
   
   <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
-    <!-- Remap odometry to use EKF output instead of raw odometry -->
-    <remap from="odom" to="odom_combined"/>
+    <remap from="odom" to="/robot_pose_ekf/odom_combined"/>
     
     <!-- Remap scan topic -->
     <remap from="scan" to="$(arg scan_topic)"/>
