@@ -208,18 +208,41 @@ class AutoExploreRRTOpenCV:
                     # Reset direct navigation state
                     self.use_direct_navigation = False
                     self.direct_nav_goal = None
+                    self.direct_nav_start_time = None
+                    self.direct_nav_start_position = None
                     self.move_base_failure_count = 0
                     self.current_goal_failure_count = 0  # Reset failure count for new goal
                     self.failed_goal = None
-                    # Stop any current motion
+                    # Reset goal tracking state
+                    self.goal_start_time = None
+                    self.last_robot_position = None
+                    self.stuck_check_time = None
+                    # Stop any current motion (publish multiple times to clear any lingering teleop commands)
                     twist = Twist()
-                    self.cmd_vel_pub.publish(twist)
+                    for _ in range(3):
+                        self.cmd_vel_pub.publish(twist)
+                        rospy.sleep(0.1)
+                    # Cancel any move_base goals
                     if self.use_simple_interface:
                         # For simple interface, just clear assigned point
                         self.assigned_point = None
                     elif self.move_base_client is not None:
-                        self.move_base_client.cancel_all_goals()
-                    rospy.loginfo("Auto Explore RRT OpenCV: Starting continuous exploration (reset all navigation state)")
+                        try:
+                            self.move_base_client.cancel_all_goals()
+                        except:
+                            pass
+                    # Clear costmaps to remove any stale planning data from teleop
+                    if self.clear_local_costmap is not None:
+                        try:
+                            self.clear_local_costmap()
+                        except:
+                            pass
+                    if self.clear_global_costmap is not None:
+                        try:
+                            self.clear_global_costmap()
+                        except:
+                            pass
+                    rospy.loginfo("Auto Explore RRT OpenCV: Starting continuous exploration (reset all navigation state from MANUAL)")
                 else:
                     self.exploring = False
                     if self.use_simple_interface:
