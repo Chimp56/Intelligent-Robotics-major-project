@@ -3,18 +3,20 @@
 Convert EKF odometry output to TF transform.
 This ensures odom->base_footprint transform is published correctly from EKF data.
 Fixes the issue where Gazebo might publish a static transform that overrides EKF.
+
+Note: robot_pose_ekf publishes geometry_msgs/PoseWithCovarianceStamped, not nav_msgs/Odometry.
 """
 import rospy
 import tf
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovarianceStamped
 
 class EKFOdomToTF:
     def __init__(self):
         rospy.init_node('ekf_odom_to_tf', anonymous=False)
         
-        # Subscribe to EKF odometry output
+        # Subscribe to EKF odometry output (PoseWithCovarianceStamped, not Odometry)
         self.odom_sub = rospy.Subscriber('/robot_pose_ekf/odom_combined', 
-                                         Odometry, 
+                                         PoseWithCovarianceStamped, 
                                          self.odom_callback)
         
         # TF broadcaster
@@ -23,13 +25,14 @@ class EKFOdomToTF:
         rospy.loginfo("EKF Odom to TF: Started, waiting for /robot_pose_ekf/odom_combined...")
     
     def odom_callback(self, msg):
-        """Convert odometry message to TF transform"""
+        """Convert PoseWithCovarianceStamped message to TF transform"""
         try:
-            # Get frame IDs from odometry message
+            # Get frame ID from message header
             parent_frame = msg.header.frame_id  # Should be "odom"
-            child_frame = msg.child_frame_id    # Should be "base_footprint"
+            # For PoseWithCovarianceStamped, child frame is always "base_footprint" (EKF convention)
+            child_frame = "base_footprint"
             
-            # Extract position and orientation
+            # Extract position and orientation from pose
             pos = msg.pose.pose.position
             orient = msg.pose.pose.orientation
             
