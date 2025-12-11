@@ -82,10 +82,6 @@
   <node pkg="tour_guide" type="position_logger.py" name="position_logger" output="screen">
   </node>
 
-  <!-- Robot health monitor (detects if robot disappears or falls) -->
-  <node pkg="tour_guide" type="robot_health_monitor.py" name="robot_health_monitor" output="screen">
-  </node>
-
   <!-- EKF Odometry to TF converter: Ensures odom->base_footprint transform is published from EKF data -->
   <!-- This fixes the issue where Gazebo might publish a static transform that overrides EKF -->
   <node pkg="tour_guide" type="ekf_odom_to_tf.py" name="ekf_odom_to_tf" output="screen">
