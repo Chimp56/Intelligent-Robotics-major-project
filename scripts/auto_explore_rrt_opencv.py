@@ -1224,6 +1224,23 @@ class AutoExploreRRTOpenCV:
         # Check if we should do initial rotation when starting (do this first)
         if not self.initial_rotation_done:
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Performing initial rotation...")
+            # Ensure move_base is stopped before starting rotation
+            if not self.use_simple_interface and self.move_base_client is not None:
+                try:
+                    self.move_base_client.cancel_all_goals()
+                    # Clear costmaps to stop move_base from publishing
+                    if self.clear_local_costmap is not None:
+                        try:
+                            self.clear_local_costmap()
+                        except:
+                            pass
+                    if self.clear_global_costmap is not None:
+                        try:
+                            self.clear_global_costmap()
+                        except:
+                            pass
+                except:
+                    pass
             self._perform_initial_rotation()
             return
         
@@ -1493,6 +1510,9 @@ class AutoExploreRRTOpenCV:
         if self.initial_rotation_start_time is None:
             self.initial_rotation_start_time = rospy.Time.now()
             rospy.loginfo("Auto Explore RRT OpenCV: Starting initial 2-revolution scan...")
+            # Initialize last yaw immediately if available
+            if self.robot_yaw is not None:
+                self.last_odom_yaw = self.robot_yaw
         
         # Target: 2 full rotations = 4pi radians
         self.initial_rotation_target = 4 * math.pi
@@ -1501,7 +1521,7 @@ class AutoExploreRRTOpenCV:
         if self.robot_yaw is not None:
             current_yaw = self.robot_yaw
             
-            # Initialize last yaw on first call
+            # Initialize last yaw on first call (if not already initialized)
             if self.last_odom_yaw is None:
                 self.last_odom_yaw = current_yaw
             else:
@@ -1537,19 +1557,44 @@ class AutoExploreRRTOpenCV:
             return
         
         # Rotate counter-clockwise at moderate speed (ALWAYS publish, even if tracking not ready)
+        # Publish multiple times to ensure command gets through cmd_vel mux
+        # This is important because move_base or other nodes might be publishing zero velocity
         twist = Twist()
         twist.linear.x = 0.0
         twist.angular.z = 0.4  # 0.4 rad/s rotation speed
-        self.cmd_vel_pub.publish(twist)
-        rospy.logdebug_throttle(1, "Auto Explore RRT OpenCV: Publishing rotation command (angular.z=%.2f)", twist.angular.z)
+        # Publish 3 times to ensure it overrides any lingering commands
+        for _ in range(3):
+            self.cmd_vel_pub.publish(twist)
         
-        # Log progress
-        if self.last_odom_yaw is not None:
+        # Also ensure move_base is not publishing (cancel all goals and clear costmaps)
+        if not self.use_simple_interface and self.move_base_client is not None:
+            try:
+                # Cancel any active goals
+                self.move_base_client.cancel_all_goals()
+                # Clear costmaps to stop move_base from planning/publishing
+                if self.clear_local_costmap is not None:
+                    try:
+                        self.clear_local_costmap()
+                    except:
+                        pass
+                if self.clear_global_costmap is not None:
+                    try:
+                        self.clear_global_costmap()
+                    except:
+                        pass
+            except:
+                pass
+        
+        # Log progress (show time-based progress if yaw tracking not available)
+        if self.last_odom_yaw is not None and self.initial_rotation_accumulated > 0:
             progress_pct = (self.initial_rotation_accumulated / self.initial_rotation_target) * 100
             rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Initial rotation progress: %.1f%% (%.1f degrees / 720 degrees)", 
                                   progress_pct, math.degrees(self.initial_rotation_accumulated))
         else:
-            rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Initial rotation in progress (waiting for odometry)...")
+            # Show time-based progress if yaw tracking not working yet
+            time_progress_pct = min(100.0, (elapsed_time / rotation_time_needed) * 100)
+            rospy.loginfo_throttle(2, "Auto Explore RRT OpenCV: Initial rotation in progress (time-based: %.1f%%, %.1f s / %.1f s)", 
+                                  time_progress_pct, elapsed_time, rotation_time_needed)
     
     def _perform_wander_exploration(self):
         """
