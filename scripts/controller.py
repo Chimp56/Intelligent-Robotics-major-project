@@ -115,7 +115,7 @@ class Controller:
         self.navigation_error = False
         self.goal_reached = False
         self.move_base_client = None
-        #self._init_move_base_client()
+        self._init_move_base_client()
         
         
         # ====================================================================
@@ -128,6 +128,7 @@ class Controller:
         # ====================================================================
         self.guiding_waypoints = []
         self.current_waypoint_index = 0
+        self.is_guiding_tour = False  # Flag to track if we're in a guiding tour
         
         # ====================================================================
         # ROS PUBLISHERS
@@ -281,8 +282,11 @@ class Controller:
             self.goal_reached = True
             self.navigation_error = False
             if self.state == RobotState.NAVIGATING:
-                # If in GUIDING mode, move to next waypoint
-                if self.prev_state == RobotState.GUIDING:
+                # If we're in a guiding tour, move to next waypoint
+                if self.is_guiding_tour:
+                    self._handle_guiding_waypoint_reached()
+                # If we were in GUIDING state before navigating, return to GUIDING
+                elif self.prev_state == RobotState.GUIDING:
                     self._handle_guiding_waypoint_reached()
                 else:
                     self.transition_to(RobotState.IDLE)
@@ -291,7 +295,12 @@ class Controller:
             self.navigation_error = True
             self.goal_reached = False
             if self.state == RobotState.NAVIGATING:
-                self.transition_to(RobotState.RECOVERY)
+                if self.is_guiding_tour:
+                    rospy.logwarn("Waypoint navigation failed, staying in GUIDING")
+                    # Stay in GUIDING and try next waypoint or recover
+                    self.transition_to(RobotState.GUIDING)
+                else:
+                    self.transition_to(RobotState.RECOVERY)
     
     def _cb_move_base_status(self, msg):
         """
@@ -512,7 +521,7 @@ class Controller:
             self.navigation_error = False
             self.goal_reached = False
         elif state == RobotState.GUIDING:
-            self._enable_yolo()
+            # self._enable_yolo()  # Commented out - YOLO methods not implemented
             self._start_guiding_sequence()
         elif state == RobotState.MANUAL:
             pass
@@ -609,9 +618,11 @@ class Controller:
     def _handle_guiding(self):
         """Handle GUIDING state - robot guides visitors through tour."""
         rospy.loginfo_throttle(5, "GUIDING: Following tour route...")
-        # Ensure YOLO is enabled
-        if not self.yolo_enabled:
-            self._enable_yolo()
+        # If we have waypoints but haven't started navigating, start navigation
+        if self.guiding_waypoints and not self.is_guiding_tour:
+            # Check if we're not already navigating
+            if self.current_goal is None:
+                self._start_guiding_sequence()
         # Waypoint navigation is handled by _handle_guiding_waypoint_reached
     
     def _handle_manual(self):
@@ -735,130 +746,101 @@ class Controller:
     #     self.yolo_enable_pub.publish(msg)
     #     self.yolo_enabled = False
     
-    # # ========================================================================
-    # # NAVIGATION MANAGEMENT
-    # # ========================================================================
+    # ========================================================================
+    # NAVIGATION MANAGEMENT
+    # ========================================================================
     
-    # def _get_navigation_goal(self):
-    #     """
-    #     Get navigation goal from parameter or return None.
+    def _send_navigation_goal(self, goal):
+        """
+        Send navigation goal to move_base.
         
-    #     Returns:
-    #         PoseStamped or None
-    #     """
-    #     # Try to get goal from parameter server
-    #     try:
-    #         goal = PoseStamped()
-    #         goal.header.frame_id = rospy.get_param('~goal_frame_id', 'map')
-    #         goal.pose.position.x = rospy.get_param('~goal_x', 0.0)
-    #         goal.pose.position.y = rospy.get_param('~goal_y', 0.0)
-    #         goal.pose.position.z = rospy.get_param('~goal_z', 0.0)
-    #         goal.pose.orientation.w = rospy.get_param('~goal_w', 1.0)
-    #         return goal
-    #     except:
-    #         return None
-    
-    # def _send_navigation_goal(self, goal):
-    #     """
-    #     Send navigation goal to move_base.
+        Args:
+            goal: PoseStamped or MoveBaseGoal
+        """
+        if self.move_base_client is None:
+            self._init_move_base_client()
         
-    #     Args:
-    #         goal: PoseStamped or MoveBaseGoal
-    #     """
-    #     if self.move_base_client is None:
-    #         self._init_move_base_client()
+        if self.move_base_client is None:
+            rospy.logerr("Cannot send goal: move_base client not available")
+            return False
         
-    #     if self.move_base_client is None:
-    #         rospy.logerr("Cannot send goal: move_base client not available")
-    #         return
-        
-    #     try:
-    #         # Convert PoseStamped to MoveBaseGoal if needed
-    #         if isinstance(goal, PoseStamped):
-    #             mb_goal = MoveBaseGoal()
-    #             mb_goal.target_pose = goal
-    #         else:
-    #             mb_goal = goal
+        try:
+            # Convert PoseStamped to MoveBaseGoal if needed
+            if isinstance(goal, PoseStamped):
+                mb_goal = MoveBaseGoal()
+                mb_goal.target_pose = goal
+            else:
+                mb_goal = goal
             
-    #         self.current_goal = mb_goal
-    #         self.move_base_client.send_goal(mb_goal)
-    #         rospy.loginfo("Navigation goal sent: (%.2f, %.2f)", 
-    #                      mb_goal.target_pose.pose.position.x,
-    #                      mb_goal.target_pose.pose.position.y)
-    #     except Exception as e:
-    #         rospy.logerr("Failed to send navigation goal: %s", str(e))
+            self.current_goal = mb_goal
+            self.move_base_client.send_goal(mb_goal)
+            rospy.loginfo("Navigation goal sent: (%.2f, %.2f)", 
+                         mb_goal.target_pose.pose.position.x,
+                         mb_goal.target_pose.pose.position.y)
+            return True
+        except Exception as e:
+            rospy.logerr("Failed to send navigation goal: %s", str(e))
+            return False
     
-    # def _cancel_navigation_goals(self):
-    #     """Cancel all active navigation goals."""
-    #     if self.move_base_client is not None:
-    #         try:
-    #             self.move_base_client.cancel_all_goals()
-    #             rospy.loginfo("Cancelled all navigation goals")
-    #         except Exception as e:
-    #             rospy.logwarn("Failed to cancel navigation goals: %s", str(e))
-    #     self.current_goal = None
-    #     self.goal_reached = False
-    #     self.navigation_error = False
+    # ========================================================================
+    # GUIDING SEQUENCE MANAGEMENT
+    # ========================================================================
     
-    # # ========================================================================
-    # # GUIDING SEQUENCE MANAGEMENT
-    # # ========================================================================
-    
-    # def _start_guiding_sequence(self):
-    #     """Initialize guiding sequence with waypoints."""
-    #     # Load waypoints from parameter or service
-    #     # For now, use a simple example
-    #     try:
-    #         waypoints_param = rospy.get_param('~guiding_waypoints', [])
-    #         if waypoints_param:
-    #             self.guiding_waypoints = waypoints_param
-    #         else:
-    #             rospy.logwarn("No waypoints configured for guiding")
-    #             self.guiding_waypoints = []
-    #     except:
-    #         self.guiding_waypoints = []
+    def _start_guiding_sequence(self):
+        """Initialize guiding sequence with waypoints."""
+        if not self.guiding_waypoints:
+            rospy.logwarn("No waypoints available for guiding")
+            return
         
-    #     self.current_waypoint_index = 0
-    #     if self.guiding_waypoints:
-    #         self._navigate_to_next_waypoint()
-    #     else:
-    #         rospy.logwarn("No waypoints available, staying in GUIDING state")
+        self.current_waypoint_index = 0
+        self.is_guiding_tour = True
+        rospy.loginfo("Starting guiding sequence with %d waypoints", len(self.guiding_waypoints))
+        self._navigate_to_next_waypoint()
     
-    # def _navigate_to_next_waypoint(self):
-    #     """Navigate to the next waypoint in the guiding sequence."""
-    #     if self.current_waypoint_index >= len(self.guiding_waypoints):
-    #         rospy.loginfo("All waypoints completed!")
-    #         self.transition_to(RobotState.IDLE)
-    #         return
+    def _navigate_to_next_waypoint(self):
+        """Navigate to the next waypoint in the guiding sequence."""
+        if self.current_waypoint_index >= len(self.guiding_waypoints):
+            rospy.loginfo("All waypoints completed!")
+            self.transition_to(RobotState.IDLE)
+            return
         
-    #     waypoint = self.guiding_waypoints[self.current_waypoint_index]
-    #     rospy.loginfo("Navigating to waypoint %d/%d: (%.2f, %.2f)",
-    #                  self.current_waypoint_index + 1,
-    #                  len(self.guiding_waypoints),
-    #                  waypoint[0], waypoint[1])
+        waypoint = self.guiding_waypoints[self.current_waypoint_index]
+        rospy.loginfo("Navigating to waypoint %d/%d: (%.2f, %.2f)",
+                     self.current_waypoint_index + 1,
+                     len(self.guiding_waypoints),
+                     waypoint[0], waypoint[1])
         
-    #     # Create goal from waypoint
-    #     goal = PoseStamped()
-    #     goal.header.frame_id = 'map'
-    #     goal.header.stamp = rospy.Time.now()
-    #     goal.pose.position.x = waypoint[0]
-    #     goal.pose.position.y = waypoint[1]
-    #     goal.pose.position.z = 0.0
-    #     goal.pose.orientation.w = waypoint[2] if len(waypoint) > 2 else 1.0
+        # Create goal from waypoint
+        goal = PoseStamped()
+        goal.header.frame_id = 'map'
+        goal.header.stamp = rospy.Time.now()
+        goal.pose.position.x = waypoint[0]
+        goal.pose.position.y = waypoint[1]
+        goal.pose.position.z = 0.0
+        # Default orientation (facing forward)
+        goal.pose.orientation.w = 1.0
         
-    #     self._send_navigation_goal(goal)
-    #     self.transition_to(RobotState.NAVIGATING)
+        if self._send_navigation_goal(goal):
+            self.transition_to(RobotState.NAVIGATING)
+        else:
+            rospy.logerr("Failed to send navigation goal, staying in GUIDING state")
     
-    # def _handle_guiding_waypoint_reached(self):
-    #     """Handle completion of a waypoint during guiding."""
-    #     self.current_waypoint_index += 1
-    #     if self.current_waypoint_index < len(self.guiding_waypoints):
-    #         # Wait a bit before next waypoint (optional)
-    #         rospy.sleep(1.0)
-    #         self._navigate_to_next_waypoint()
-    #     else:
-    #         rospy.loginfo("Guiding tour complete!")
-    #         self.transition_to(RobotState.IDLE)
+    def _handle_guiding_waypoint_reached(self):
+        """Handle completion of a waypoint during guiding."""
+        self.current_waypoint_index += 1
+        if self.current_waypoint_index < len(self.guiding_waypoints):
+            rospy.loginfo("Waypoint %d reached, moving to next waypoint...", self.current_waypoint_index)
+            # Transition back to GUIDING state before navigating to next waypoint
+            # This ensures prev_state is correct for the next navigation cycle
+            if self.state == RobotState.NAVIGATING:
+                self.transition_to(RobotState.GUIDING)
+            # Small delay before next waypoint (optional)
+            rospy.sleep(0.5)
+            self._navigate_to_next_waypoint()
+        else:
+            rospy.loginfo("Guiding tour complete! All waypoints visited.")
+            self.is_guiding_tour = False
+            self.transition_to(RobotState.IDLE)
     
     # # ========================================================================
     # # UTILITY FUNCTIONS

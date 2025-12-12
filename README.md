@@ -47,6 +47,15 @@ rosservice call /tour_guide/start_mapping
 rosservice call /tour_guide/stop_mapping
 ```
 
+Go to idle state
+```bash
+rosservice call /tour_guide/go_to_idle
+```
+
+```bash
+rosrun tour_guide waypoint_recorder.py
+```
+
 ## Exploration Algorithms
 
 The tour guide supports two exploration algorithms:
