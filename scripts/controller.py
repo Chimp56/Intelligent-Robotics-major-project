@@ -66,6 +66,7 @@ SERVICE_START_NAVIGATION = '/tour_guide/start_navigation'
 SERVICE_START_GUIDING = '/tour_guide/start_guiding'
 SERVICE_EMERGENCY_STOP = '/tour_guide/emergency_stop'
 SERVICE_RESUME = '/tour_guide/resume'
+SERVICE_GO_TO_IDLE = '/tour_guide/go_to_idle'
 
 # ============================================================================
 # CONTROLLER CLASS
@@ -152,6 +153,7 @@ class Controller:
         # ====================================================================
         rospy.Service(SERVICE_START_MAPPING, Empty, self._srv_start_mapping)
         rospy.Service(SERVICE_STOP_MAPPING, Empty, self._srv_stop_mapping)
+        rospy.Service(SERVICE_GO_TO_IDLE, Empty, self._srv_go_to_idle)
         # rospy.Service(SERVICE_START_NAVIGATION, Empty, self._srv_start_navigation)
         # rospy.Service(SERVICE_START_GUIDING, Empty, self._srv_start_guiding)
         # rospy.Service(SERVICE_EMERGENCY_STOP, Empty, self._srv_emergency_stop)
@@ -350,10 +352,36 @@ class Controller:
         """
         rospy.loginfo("Service call: stop_mapping")
         if self.state == RobotState.MAPPING:
-            self._stop_gmapping()
+            # self._stop_gmapping()
             self.transition_to(RobotState.IDLE)
         else:
             rospy.logwarn("Cannot stop mapping from state: %s", self.state.value)
+        return EmptyResponse()
+    
+    def _srv_go_to_idle(self, req):
+        """
+        Service handler to transition to IDLE state from any state.
+        
+        This service allows the user to force the robot into IDLE state,
+        canceling any ongoing operations (mapping, navigation, guiding, etc.).
+        
+        Args:
+            req: Empty service request
+            
+        Returns:
+            EmptyResponse
+        """
+        rospy.loginfo("Service call: go_to_idle")
+        if self.state == RobotState.IDLE:
+            rospy.loginfo("Already in IDLE state")
+        else:
+            rospy.loginfo("Transitioning to IDLE from state: %s", self.state.value)
+            # Cancel any active navigation goals
+            self._cancel_navigation_goals()
+            # Stop all motion
+            self._stop_all_motion()
+            # Transition to IDLE
+            self.transition_to(RobotState.IDLE)
         return EmptyResponse()
     
     # def _srv_start_navigation(self, req):
