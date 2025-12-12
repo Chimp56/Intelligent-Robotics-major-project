@@ -47,7 +47,7 @@ UNEXPLORED_BONUS_MULTIPLIER = 1.5  # Bonus multiplier for goals near unexplored 
 RATE_HZ = 10.0  # Hz - main loop rate (matching assigner.py)
 DELAY_AFTER_ASSIGNMENT = 0.5  # seconds - delay after assigning goal
 MIN_GOAL_DISTANCE = 0.6  # Minimum distance from robot to goal (meters)
-MAX_GOAL_DISTANCE = 4  # Maximum distance from robot to goal (meters) - reduced for better reachability
+MAX_GOAL_DISTANCE = 2  # Maximum distance from robot to goal (meters) - reduced for better reachability
 GOAL_TIMEOUT = 30.0  # seconds - timeout for reaching a goal
 NUM_CANDIDATE_SAMPLES = 30  # Number of candidate points to sample per iteration
 
